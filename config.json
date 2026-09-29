@@ -1,0 +1,13 @@
+{
+  "channel_topic": "Stoicism and practical philosophy",
+  "language": "en",
+  "target_duration_min": 30,
+  "videos_per_week": 7,
+  "publish_time": "10:00",
+  "timezone": "Europe/Kiev",
+  "youtube_publish": false,
+  "privacy_status": "private",
+  "aspect": "16:9",
+  "voice": "en_US-ryan-high",
+  "words_per_minute": 145
+}
