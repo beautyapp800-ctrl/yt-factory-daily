@@ -43,12 +43,15 @@ def load_env(path=ENV_PATH):
     values = {}
     path = Path(path)
     if path.exists():
-        for raw in path.read_text(encoding="utf-8").splitlines():
+        # utf-8-sig: PowerShell's > and Out-File write a BOM, which would otherwise
+        # end up glued to the first key name.
+        for raw in path.read_text(encoding="utf-8-sig").splitlines():
             line = raw.strip()
             if not line or line.startswith("#") or "=" not in line:
                 continue
             key, _, value = line.partition("=")
-            key = key.strip()
+            # "export FOO=bar" is a common shape to paste in; treat it as FOO=bar.
+            key = key.strip().removeprefix("export ").strip().lstrip("﻿")
             value = value.strip()
             if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
                 value = value[1:-1]
