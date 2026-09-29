@@ -17,9 +17,13 @@ ROOT = Path(__file__).resolve().parent.parent
 ENV_PATH = ROOT / ".env"
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL = "llama-3.3-70b-versatile"
+GROQ_MODEL = "openai/gpt-oss-120b"
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 GEMINI_MODEL = "gemini-flash-lite"
+
+# Cloudflare sits in front of api.groq.com and answers "error code: 1010" to
+# urllib's default User-Agent, so every request carries an explicit one.
+USER_AGENT = "yt-factory/1.0"
 
 MAX_RPM = 25
 _RATE_WINDOW = 60.0
@@ -28,6 +32,27 @@ _MAX_429_WAITS = 5
 
 class LLMError(Exception):
     pass
+
+
+_settings_cache = None
+
+
+def _settings():
+    """Model names and the rate cap, from config.json's optional "llm" block."""
+    global _settings_cache
+    if _settings_cache is None:
+        try:
+            from core.config import load_config
+            block = load_config().get("llm") or {}
+        except Exception as e:  # config problems are the config module's to report
+            log.warning("could not read llm settings from config (%s), using defaults", e)
+            block = {}
+        _settings_cache = {
+            "groq_model": block.get("groq_model") or GROQ_MODEL,
+            "gemini_model": block.get("gemini_model") or GEMINI_MODEL,
+            "max_rpm": int(block.get("max_rpm") or MAX_RPM),
+        }
+    return _settings_cache
 
 
 # --- .env ------------------------------------------------------------------
@@ -74,16 +99,17 @@ _calls_lock = Lock()
 
 
 def _rate_limit():
-    """Block until fewer than MAX_RPM calls sit inside the trailing 60s window."""
+    """Block until fewer than max_rpm calls sit inside the trailing 60s window."""
+    cap = _settings()["max_rpm"]
     while True:
         with _calls_lock:
             now = time.monotonic()
             _calls[:] = [t for t in _calls if now - t < _RATE_WINDOW]
-            if len(_calls) < MAX_RPM:
+            if len(_calls) < cap:
                 _calls.append(now)
                 return
             wait = _RATE_WINDOW - (now - _calls[0]) + 0.05
-        log.info("rate limit: %d calls in the last minute, waiting %.1fs", MAX_RPM, wait)
+        log.info("rate limit: %d calls in the last minute, waiting %.1fs", cap, wait)
         time.sleep(wait)
 
 
@@ -93,7 +119,8 @@ def _post(url, payload, headers, timeout=180):
     """POST JSON. Returns (status, body_text). HTTP errors come back as values, not exceptions."""
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=data, method="POST",
-                                 headers={"Content-Type": "application/json", **headers})
+                                 headers={"Content-Type": "application/json",
+                                          "User-Agent": USER_AGENT, **headers})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.status, resp.read().decode("utf-8", "replace")
@@ -117,12 +144,17 @@ def _call_groq(prompt, system, max_tokens, temperature, json_mode):
     key = get_key("GROQ_API_KEY")
     if not key:
         raise LLMError("GROQ_API_KEY is not set (put it in .env)")
+    model = _settings()["groq_model"]
     messages = ([{"role": "system", "content": system}] if system else [])
     messages.append({"role": "user", "content": prompt})
-    payload = {"model": GROQ_MODEL, "messages": messages,
+    payload = {"model": model, "messages": messages,
                "max_tokens": max_tokens, "temperature": temperature}
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
+    if "gpt-oss" in model:
+        # These models bill their reasoning against max_tokens; keep it short so the
+        # answer itself is not the part that gets cut off.
+        payload["reasoning_effort"] = "low"
 
     for attempt in range(_MAX_429_WAITS):
         _rate_limit()
@@ -138,10 +170,16 @@ def _call_groq(prompt, system, max_tokens, temperature, json_mode):
             raise LLMError(f"groq HTTP {status}: {body[:400]}")
         data = json.loads(body)
         usage = data.get("usage") or {}
-        log.info("groq %s | %s tokens (%s in, %s out) | %.1fs", GROQ_MODEL,
+        choice = data["choices"][0]
+        log.info("groq %s | %s tokens (%s in, %s out) | %.1fs", model,
                  usage.get("total_tokens", "?"), usage.get("prompt_tokens", "?"),
                  usage.get("completion_tokens", "?"), elapsed)
-        return data["choices"][0]["message"]["content"]
+        if choice.get("finish_reason") == "length":
+            log.warning("groq hit the %d token ceiling; the answer is cut off", max_tokens)
+        content = (choice.get("message") or {}).get("content") or ""
+        if not content.strip():
+            raise LLMError("groq returned empty content")
+        return content
     raise LLMError(f"groq still rate-limited after {_MAX_429_WAITS} waits")
 
 
@@ -157,7 +195,8 @@ def _call_gemini(prompt, system, max_tokens, temperature, json_mode):
         payload["systemInstruction"] = {"parts": [{"text": system}]}
     if json_mode:
         payload["generationConfig"]["responseMimeType"] = "application/json"
-    url = GEMINI_URL.format(model=GEMINI_MODEL)
+    model = _settings()["gemini_model"]
+    url = GEMINI_URL.format(model=model)
 
     for attempt in range(_MAX_429_WAITS):
         _rate_limit()
@@ -176,7 +215,7 @@ def _call_gemini(prompt, system, max_tokens, temperature, json_mode):
         if not candidates:
             raise LLMError(f"gemini returned no candidates: {body[:400]}")
         usage = data.get("usageMetadata") or {}
-        log.info("gemini %s | %s tokens | %.1fs", GEMINI_MODEL,
+        log.info("gemini %s | %s tokens | %.1fs", model,
                  usage.get("totalTokenCount", "?"), elapsed)
         parts = candidates[0].get("content", {}).get("parts") or []
         text = "".join(p.get("text", "") for p in parts)

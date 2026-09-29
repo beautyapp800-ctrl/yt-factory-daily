@@ -7,12 +7,23 @@ MARKDOWN_CHARS = "*#`_[]|<>"
 _ABBREVIATIONS = ("Mr", "Mrs", "Ms", "Dr", "Prof", "St", "Sr", "Jr", "vs", "etc", "e.g", "i.e")
 _BANNED_OPENERS = ("in conclusion", "remember that", "it is important to")
 
+# Typography the model emits that a speech synthesizer either mispronounces or
+# swallows. The non-breaking hyphen is the worst offender: it is not a hyphen to
+# most voices, so "half-finished" comes out as one run-together word.
+_TYPOGRAPHY = {
+    "‘": "'", "’": "'", "‚": "'", "‛": "'",
+    "“": '"', "”": '"', "„": '"', "«": '"', "»": '"',
+    "‐": "-", "‑": "-", "−": "-",
+    "…": ".", " ": " ", " ": " ", " ": " ", "﻿": "",
+}
+
 
 def clean(text):
     """Strip markdown, parentheticals and stray labels so a TTS engine reads it cleanly."""
     if not text:
         return ""
     text = text.replace("\r\n", "\n")
+    text = text.translate(str.maketrans(_TYPOGRAPHY))
     # Fenced blocks and inline code.
     text = re.sub(r"```.*?```", " ", text, flags=re.S)
     # Emphasis first, so a label wrapped in ** is visible to the label pass below.

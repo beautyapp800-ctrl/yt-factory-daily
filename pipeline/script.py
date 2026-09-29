@@ -92,8 +92,9 @@ Then one thing to do tomorrow morning, specific enough to actually do.
 Do not name the lesson number. Do not write the lesson title as a heading.
 Start straight into the situation. Narration only."""
 
+    # x6, not x2: reasoning models spend part of the ceiling before the prose starts.
     raw = complete(prompt, system=NARRATION_SYSTEM,
-                   max_tokens=int(target_words * 3), temperature=0.85)
+                   max_tokens=int(target_words * 6), temperature=0.85)
     return txt.clean(raw)
 
 
@@ -112,7 +113,7 @@ welcome, no channel name, no "in this video". Do not list what is coming.
 Name the tension, then promise that there is a way to stand inside it.
 Narration only."""
     return txt.clean(complete(prompt, system=NARRATION_SYSTEM,
-                              max_tokens=HOOK_WORDS * 3, temperature=0.9))
+                              max_tokens=HOOK_WORDS * 6, temperature=0.9))
 
 
 def write_outro(outline, cfg):
@@ -128,7 +129,7 @@ the video was worth their time, no more than two sentences, no enthusiasm, no
 asking for likes or comments or the bell.
 Narration only."""
     return txt.clean(complete(prompt, system=NARRATION_SYSTEM,
-                              max_tokens=OUTRO_WORDS * 3, temperature=0.85))
+                              max_tokens=OUTRO_WORDS * 6, temperature=0.85))
 
 
 # --- stage D ---------------------------------------------------------------
