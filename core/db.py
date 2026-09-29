@@ -20,7 +20,8 @@ CREATE TABLE IF NOT EXISTS videos (
     thumbnail_path TEXT,
     youtube_id TEXT,
     published_at TEXT,
-    error TEXT
+    error TEXT,
+    seed TEXT
 );
 CREATE TABLE IF NOT EXISTS scenes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -43,7 +44,10 @@ CREATE TABLE IF NOT EXISTS events (
 """
 
 _VIDEO_FIELDS = {"topic", "title", "status", "duration_s", "video_path",
-                 "thumbnail_path", "youtube_id", "published_at", "error"}
+                 "thumbnail_path", "youtube_id", "published_at", "error", "seed"}
+
+# Columns added after the first release, applied to existing databases by _migrate().
+_MIGRATIONS = [("videos", "seed", "TEXT")]
 
 
 def _now():
@@ -67,6 +71,15 @@ def _connect():
 def init_db():
     with _connect() as conn:
         conn.executescript(SCHEMA)
+        _migrate(conn)
+
+
+def _migrate(conn):
+    """Add columns that older databases predate. Safe to run on every start."""
+    for table, column, decl in _MIGRATIONS:
+        existing = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
 
 def create_video(topic):
@@ -75,6 +88,12 @@ def create_video(topic):
             "INSERT INTO videos (created_at, topic, status) VALUES (?, ?, 'pending')",
             (_now(), topic))
         return cur.lastrowid
+
+
+def get_video(video_id):
+    with _connect() as conn:
+        row = conn.execute("SELECT * FROM videos WHERE id = ?", (video_id,)).fetchone()
+        return dict(row) if row else None
 
 
 def update_video(video_id, **fields):
@@ -100,6 +119,12 @@ def add_scene(video_id, idx, text=None, image_prompt=None,
         return cur.lastrowid
 
 
+def clear_scenes(video_id):
+    """Drop a video's scenes so a regenerated script does not pile up on the old one."""
+    with _connect() as conn:
+        conn.execute("DELETE FROM scenes WHERE video_id = ?", (video_id,))
+
+
 def get_scenes(video_id):
     with _connect() as conn:
         rows = conn.execute("SELECT * FROM scenes WHERE video_id = ? ORDER BY idx", (video_id,))
@@ -118,3 +143,17 @@ def topic_exists(topic):
         row = conn.execute("SELECT 1 FROM videos WHERE lower(topic) = lower(?) LIMIT 1",
                            (topic.strip(),)).fetchone()
         return row is not None
+
+
+def recent_topics(limit=200):
+    with _connect() as conn:
+        rows = conn.execute("SELECT topic FROM videos ORDER BY id DESC LIMIT ?", (limit,))
+        return [r["topic"] for r in rows if r["topic"]]
+
+
+def seed_counts():
+    """How many videos used each seed theme, for picking the least-used one."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT seed, COUNT(*) AS n FROM videos WHERE seed IS NOT NULL GROUP BY seed")
+        return {r["seed"]: r["n"] for r in rows}

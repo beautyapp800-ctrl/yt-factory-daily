@@ -40,8 +40,14 @@ def test_stage_failure(tmp):
         def run(video_id, cfg):
             raise RuntimeError("boom in tts")
 
+    class Noop:
+        @staticmethod
+        def run(video_id, cfg):
+            return True
+
+    # Every stage is stubbed: the real ones call an LLM, and this test must stay offline.
     original = run.STAGES
-    run.STAGES = [(n, Boom if n == "tts" else m, st) for n, m, st in original]
+    run.STAGES = [(n, Boom if n == "tts" else Noop, st) for n, m, st in original]
     try:
         vid = db.create_video("failure test topic")
         result = run.process_video(vid, {})  # must not raise

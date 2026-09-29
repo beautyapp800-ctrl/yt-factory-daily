@@ -9,5 +9,7 @@
   "privacy_status": "private",
   "aspect": "16:9",
   "voice": "en_US-ryan-high",
-  "words_per_minute": 145
+  "words_per_minute": 145,
+  "lessons_per_video": 10,
+  "image_style": "cinematic painterly illustration, muted earth tones, marble and weathered stone, soft volumetric light, quiet atmosphere, no text, no lettering, no watermark, no modern branding"
 }
