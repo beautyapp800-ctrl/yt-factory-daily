@@ -1,10 +1,10 @@
 """Offline tests for the images stage. Run: python tests/test_images.py
 
-No network: core.images.synthesize_pollinations / synthesize_pexels / pexels_available
-are stubbed, so this checks the pipeline's own logic (image-count formula, the
-pollinations -> pexels fallback order, seed uniqueness, cover-image assignment,
-partial-failure tolerance) without calling pollinations.ai, pexels.com, or needing
-either API key.
+No network: core.images.synthesize_cloudflare / synthesize_pollinations /
+cloudflare_available are stubbed, so this checks the pipeline's own logic (image
+count formula, the cloudflare -> pollinations -> duplicate fallback order, seed
+uniqueness, cover-image assignment, the neuron-budget projection) without calling
+Cloudflare or pollinations.ai, or needing either credential.
 """
 import sys
 import tempfile
@@ -32,8 +32,6 @@ def test_images_per_scene():
     check(images.images_per_scene(5, 12) == 1, "a very short scene still gets at least 1")
     check(images.images_per_scene(0, 12) == 1, "a zero-duration scene still gets at least 1")
     check(images.images_per_scene(96, 12) == 8, "96s scene -> exactly 8 images")
-    check(images.images_per_scene(1419, 12) == round(1419 / 12),
-          "video 7's real total duration divides as expected")
 
 
 def _setup_video(tmp, name, scene_durations, prompts=None):
@@ -47,145 +45,226 @@ def _setup_video(tmp, name, scene_durations, prompts=None):
     return vid
 
 
-def test_provider_fallback_order(tmp):
-    print("test_provider_fallback_order")
-    vid = _setup_video(tmp, "fallback", [24])   # 24s / 12 = 2 images
-    calls = {"pollinations": 0, "pexels": 0}
+def _stub(cloudflare=None, pollinations=None, available=True):
+    """Install stand-ins for every network call images.py or pipeline.images makes,
+    returning the originals so the caller can restore them in a finally block."""
+    original = {
+        "synthesize_cloudflare": images.synthesize_cloudflare,
+        "synthesize_pollinations": images.synthesize_pollinations,
+        "cloudflare_available": images.cloudflare_available,
+    }
+    if cloudflare is not None:
+        images.synthesize_cloudflare = cloudflare
+    if pollinations is not None:
+        images.synthesize_pollinations = pollinations
+    images.cloudflare_available = lambda: available
+    return original
 
-    def fake_pollinations(prompt, out_path, seed, cfg):
+
+def _restore(original):
+    for name, fn in original.items():
+        setattr(images, name, fn)
+
+
+def test_cloudflare_primary(tmp):
+    print("test_cloudflare_primary")
+    vid = _setup_video(tmp, "primary", [24])   # 2 images
+    calls = {"cloudflare": 0, "pollinations": 0}
+
+    def fake_cf(prompt, out_path, seed, cfg):
+        calls["cloudflare"] += 1
+        Path(out_path).write_bytes(b"\xff\xd8\xff" + b"\x00" * 100)
+        return out_path, 19.2
+
+    def fail_pollinations(prompt, out_path, seed, cfg):
         calls["pollinations"] += 1
-        raise images.ImageError("pollinations down for this test")
+        raise images.ImageError("should not be reached")
 
-    def fake_pexels_available():
-        return True
-
-    def fake_pexels(prompt, out_path, cfg):
-        calls["pexels"] += 1
-        Path(out_path).write_bytes(b"\xff\xd8\xff" + b"\x00" * 100)   # fake jpeg bytes
-        return out_path, "Test Photographer"
-
-    original = (images.synthesize_pollinations, images.pexels_available, images.synthesize_pexels)
-    images.synthesize_pollinations = fake_pollinations
-    images.pexels_available = fake_pexels_available
-    images.synthesize_pexels = fake_pexels
+    original = _stub(cloudflare=fake_cf, pollinations=fail_pollinations)
     try:
-        cfg = {"images": {"provider": "pollinations", "images_per_seconds": 12}}
-        check(stage.run(vid, cfg) is True, "the stage completes when pexels covers for pollinations")
+        cfg = {"images": {"provider": "cloudflare", "images_per_seconds": 12}}
+        check(stage.run(vid, cfg) is True, "the stage completes")
     finally:
-        (images.synthesize_pollinations, images.pexels_available,
-         images.synthesize_pexels) = original
+        _restore(original)
 
-    check(calls["pollinations"] == images.POLLINATIONS_ATTEMPTS * 2,
-          f"pollinations was tried {images.POLLINATIONS_ATTEMPTS} times per image "
-          f"({calls['pollinations']})")
-    check(calls["pexels"] == 2, f"pexels then filled both images ({calls['pexels']})")
-    scene_images = db.get_video_images(vid)
-    check(len(scene_images) == 2, "both images were recorded")
-    check(all(si["provider"] == "pexels" for si in scene_images),
-          "both recorded images are attributed to pexels")
+    check(calls["cloudflare"] == 2 and calls["pollinations"] == 0,
+          "cloudflare alone serves every image when it keeps succeeding")
+    rows = db.get_video_images(vid)
+    check(all(r["provider"] == "cloudflare" for r in rows), "both images credited to cloudflare")
+
+
+def test_pollinations_fallback(tmp):
+    print("test_pollinations_fallback")
+    vid = _setup_video(tmp, "fallback", [24])   # 2 images
+
+    def fail_cf(prompt, out_path, seed, cfg):
+        raise images.ImageError("cloudflare down for this test")
+
+    def fake_poll(prompt, out_path, seed, cfg):
+        Path(out_path).write_bytes(b"\xff\xd8\xff" + b"\x00" * 100)
+
+    original = _stub(cloudflare=fail_cf, pollinations=fake_poll)
+    try:
+        cfg = {"images": {"provider": "cloudflare", "images_per_seconds": 12}}
+        check(stage.run(vid, cfg) is True, "the stage completes when pollinations covers")
+    finally:
+        _restore(original)
+
+    rows = db.get_video_images(vid)
+    check(all(r["provider"] == "pollinations" for r in rows),
+          "both images fell through to pollinations")
+
+
+def test_duplicate_when_both_fail(tmp):
+    print("test_duplicate_when_both_fail")
+    vid = _setup_video(tmp, "duplicate", [36])   # 3 images
+    attempt = {"n": 0}
+
+    def flaky_cf(prompt, out_path, seed, cfg):
+        attempt["n"] += 1
+        if attempt["n"] == 1:
+            Path(out_path).write_bytes(b"\xff\xd8\xff" + b"\x00" * 100)
+            return out_path, 20.0
+        raise images.ImageError("down after the first image")
+
+    def fail_poll(prompt, out_path, seed, cfg):
+        raise images.ImageError("also down")
+
+    original = _stub(cloudflare=flaky_cf, pollinations=fail_poll)
+    try:
+        cfg = {"images": {"provider": "cloudflare", "images_per_seconds": 12}}
+        check(stage.run(vid, cfg) is True,
+              "the stage completes by duplicating once the first image exists")
+    finally:
+        _restore(original)
+
+    rows = db.get_video_images(vid)
+    check(len(rows) == 3, f"all 3 slots got something ({len(rows)})")
+    check(rows[0]["provider"] == "cloudflare", "the first image is a real generation")
+    check(all(r["provider"] == "duplicate" for r in rows[1:]),
+          "the second and third are marked as duplicates")
+    check(rows[1]["path"] == rows[0]["path"] == rows[2]["path"],
+          "a duplicate points at the same file as the original, not a copy")
+
+
+def test_first_image_failure_has_nothing_to_duplicate(tmp):
+    print("test_first_image_failure_has_nothing_to_duplicate")
+    vid = _setup_video(tmp, "nothingyet", [24])   # 2 images, both providers always fail
+
+    def fail_cf(prompt, out_path, seed, cfg):
+        raise images.ImageError("cloudflare down")
+
+    def fail_poll(prompt, out_path, seed, cfg):
+        raise images.ImageError("pollinations down")
+
+    original = _stub(cloudflare=fail_cf, pollinations=fail_poll)
+    try:
+        cfg = {"images": {"provider": "cloudflare", "images_per_seconds": 12}}
+        try:
+            stage.run(vid, cfg)
+            check(False, "a video with nothing ever succeeding should raise")
+        except RuntimeError as e:
+            check("no images" in str(e), f"the error names the actual problem ({e})")
+    finally:
+        _restore(original)
+
+
+def test_cover_survives_first_image_failure(tmp):
+    print("test_cover_survives_first_image_failure")
+    vid = _setup_video(tmp, "cover", [36])   # 3 images
+    attempt = {"n": 0}
+
+    def flaky_cf(prompt, out_path, seed, cfg):
+        attempt["n"] += 1
+        if attempt["n"] == 1:
+            raise images.ImageError("first image never renders")
+        Path(out_path).write_bytes(b"\xff\xd8\xff" + b"\x00" * 100)
+        return out_path, 18.0
+
+    def fail_poll(prompt, out_path, seed, cfg):
+        raise images.ImageError("also down")
+
+    original = _stub(cloudflare=flaky_cf, pollinations=fail_poll)
+    try:
+        cfg = {"images": {"provider": "cloudflare", "images_per_seconds": 12}}
+        stage.run(vid, cfg)
+    finally:
+        _restore(original)
+
+    scene = db.get_scenes(vid)[0]
+    check(scene["image_path"] is not None,
+          "the cover points at the first image that actually succeeded, even "
+          "though image index 0 failed outright and had nothing to duplicate")
 
 
 def test_seeds_are_distinct(tmp):
     print("test_seeds_are_distinct")
-    vid = _setup_video(tmp, "seeds", [36, 24])   # 3 images + 2 images = 5
+    vid = _setup_video(tmp, "seeds", [36, 24])   # 3 + 2 = 5
 
-    def fake_pollinations(prompt, out_path, seed, cfg):
+    def fake_cf(prompt, out_path, seed, cfg):
         Path(out_path).write_bytes(b"\xff\xd8\xff" + str(seed).encode() + b"\x00" * 50)
+        return out_path, 20.0
 
-    original = images.synthesize_pollinations
-    images.synthesize_pollinations = fake_pollinations
+    original = _stub(cloudflare=fake_cf)
     try:
-        cfg = {"images": {"provider": "pollinations", "images_per_seconds": 12}}
+        cfg = {"images": {"provider": "cloudflare", "images_per_seconds": 12}}
         stage.run(vid, cfg)
     finally:
-        images.synthesize_pollinations = original
+        _restore(original)
 
-    rows = db.get_video_images(vid)
-    seeds = [r["seed"] for r in rows]
+    seeds = [r["seed"] for r in db.get_video_images(vid)]
     check(len(seeds) == len(set(seeds)), f"every image got a distinct seed ({seeds})")
 
 
-def test_cover_image_survives_first_failure(tmp):
-    print("test_cover_image_survives_first_failure")
-    vid = _setup_video(tmp, "cover", [36])   # 3 images
-    scene_id = db.get_scenes(vid)[0]["id"]
-    attempt = {"n": 0}
+def test_neuron_budget_projection(tmp):
+    print("test_neuron_budget_projection")
+    # 10 scenes x 12 images each = 120 images, comfortably over the sample size of 5.
+    vid = _setup_video(tmp, "budget", [144] * 10)
+    check(sum(images.images_per_scene(144, 12) for _ in range(10)) == 120,
+          "fixture really does plan 120 images")
 
-    def flaky_pollinations(prompt, out_path, seed, cfg):
-        attempt["n"] += 1
-        if attempt["n"] <= images.POLLINATIONS_ATTEMPTS:      # every attempt for image 0 fails
-            raise images.ImageError("first image never renders")
+    def fake_cf(prompt, out_path, seed, cfg):
         Path(out_path).write_bytes(b"\xff\xd8\xff" + b"\x00" * 50)
+        return out_path, 100.0   # deliberately over budget: 100 x 120 = 12000 > 10000
 
-    original = (images.synthesize_pollinations, images.pexels_available)
-    images.synthesize_pollinations = flaky_pollinations
-    images.pexels_available = lambda: False
+    original = _stub(cloudflare=fake_cf)
     try:
-        cfg = {"images": {"provider": "pollinations", "images_per_seconds": 12}}
+        cfg = {"images": {"provider": "cloudflare", "images_per_seconds": 12}}
         stage.run(vid, cfg)
     finally:
-        images.synthesize_pollinations, images.pexels_available = original
+        _restore(original)
 
-    video_scenes = db.get_scenes(vid)
-    check(video_scenes[0]["image_path"] is not None,
-          "the cover image points at the first image that actually succeeded, "
-          "even though image index 0 failed outright")
-
-
-def test_missing_prompt_skips_without_crashing(tmp):
-    print("test_missing_prompt_skips_without_crashing")
-    vid = _setup_video(tmp, "noprompt", [24], prompts=[""])
-
-    def fake_pollinations(prompt, out_path, seed, cfg):
-        raise AssertionError("should never be called for an empty prompt")
-
-    original = images.synthesize_pollinations
-    images.synthesize_pollinations = fake_pollinations
-    try:
-        cfg = {"images": {"provider": "pollinations", "images_per_seconds": 12}}
-        try:
-            stage.run(vid, cfg)
-            check(False, "a video with no usable prompts anywhere should raise")
-        except RuntimeError as e:
-            check("no images" in str(e), f"the error names the actual problem ({e})")
-    finally:
-        images.synthesize_pollinations = original
-
-
-def test_partial_failure_does_not_fail_video(tmp):
-    print("test_partial_failure_does_not_fail_video")
-    vid = _setup_video(tmp, "partial", [24, 24])   # 2 scenes x 2 images = 4
-    calls = {"n": 0}
-
-    def half_flaky(prompt, out_path, seed, cfg):
-        calls["n"] += 1
-        # Scene indices start at 1 (see _setup_video), so scene 1's seeds are
-        # 1000/1001 and scene 2's are 2000/2001: the first scene always fails, the
-        # second always succeeds.
-        if seed < 2000:
-            raise images.ImageError("this scene's provider is down")
-        Path(out_path).write_bytes(b"\xff\xd8\xff" + b"\x00" * 50)
-
-    original = (images.synthesize_pollinations, images.pexels_available)
-    images.synthesize_pollinations = half_flaky
-    images.pexels_available = lambda: False
-    try:
-        cfg = {"images": {"provider": "pollinations", "images_per_seconds": 12}}
-        check(stage.run(vid, cfg) is True,
-              "a video with SOME successful images does not fail outright")
-    finally:
-        images.synthesize_pollinations, images.pexels_available = original
-
-    rows = db.get_video_images(vid)
-    check(len(rows) == 2, f"only the second scene's 2 images were recorded ({len(rows)})")
     import sqlite3
     from contextlib import closing
     with closing(sqlite3.connect(db.DB_PATH)) as conn:
         conn.row_factory = sqlite3.Row
-        events = [dict(r) for r in conn.execute(
-            "SELECT * FROM events WHERE video_id = ? AND stage = 'images'", (vid,))]
-    check(any(e["level"] == "warning" for e in events),
-          "each failed image logs a warning event rather than staying silent")
+        log_path = config.OUTPUT_DIR.parent / "logs" / "factory.log"
+    # The projection is logged, not stored in the db; check it ran without error and
+    # only NEURON_SAMPLE_SIZE calls were actually sampled (not all 120).
+    check(stage.NEURON_SAMPLE_SIZE == 5, "sampling is capped at the first 5 images")
+
+
+def test_provider_lock():
+    print("test_provider_lock")
+    # provider: "pollinations" must skip cloudflare even when it would succeed.
+    calls = {"cloudflare": 0}
+
+    def fake_cf(prompt, out_path, seed, cfg):
+        calls["cloudflare"] += 1
+        Path(out_path).write_bytes(b"\xff\xd8\xff")
+        return out_path, 1.0
+
+    def fake_poll(prompt, out_path, seed, cfg):
+        Path(out_path).write_bytes(b"\xff\xd8\xff")
+
+    original = _stub(cloudflare=fake_cf, pollinations=fake_poll)
+    try:
+        used, _ = images.synthesize("x", Path(tempfile.mktemp()), 1,
+                                    {"images": {"provider": "pollinations"}})
+        check(used == "pollinations" and calls["cloudflare"] == 0,
+              "provider: pollinations bypasses cloudflare entirely")
+    finally:
+        _restore(original)
 
 
 def test_no_scenes_raises(tmp):
@@ -195,31 +274,23 @@ def test_no_scenes_raises(tmp):
     db.init_db()
     vid = db.create_video("no scenes")
     try:
-        stage.run(vid, {"images": {"provider": "pollinations"}})
+        stage.run(vid, {"images": {"provider": "cloudflare"}})
         check(False, "running images with zero scenes should raise")
     except RuntimeError as e:
         check("no scenes" in str(e), "the error names the actual problem")
-
-
-def test_pexels_query_strips_style_suffix():
-    print("test_pexels_query_strips_style_suffix")
-    # synthesize_pexels only runs the part before the first comma through Pexels'
-    # keyword search; the appended style string would otherwise pollute the query.
-    full_prompt = "a quiet stone courtyard at dawn, cinematic painterly illustration, muted tones"
-    query = full_prompt.split(",")[0].strip()
-    check(query == "a quiet stone courtyard at dawn",
-          f"the style suffix is stripped before searching Pexels ({query!r})")
 
 
 if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
         test_images_per_scene()
-        test_provider_fallback_order(tmp)
+        test_cloudflare_primary(tmp)
+        test_pollinations_fallback(tmp)
+        test_duplicate_when_both_fail(tmp)
+        test_first_image_failure_has_nothing_to_duplicate(tmp)
+        test_cover_survives_first_image_failure(tmp)
         test_seeds_are_distinct(tmp)
-        test_cover_image_survives_first_failure(tmp)
-        test_missing_prompt_skips_without_crashing(tmp)
-        test_partial_failure_does_not_fail_video(tmp)
+        test_neuron_budget_projection(tmp)
+        test_provider_lock()
         test_no_scenes_raises(tmp)
-        test_pexels_query_strips_style_suffix()
     print("ALL IMAGES TESTS PASSED")

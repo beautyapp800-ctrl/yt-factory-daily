@@ -1,19 +1,25 @@
-"""Image generation: two providers.
+"""Image generation: Cloudflare Workers AI primary, pollinations.ai fallback.
 
-pollinations.ai is primary. As of writing it no longer matches its old reputation as
-"free, no key, just rate-limited": anonymous requests intermittently answer with
-HTTP 402 (payment required, an x402 crypto-payment scheme), tied to load rather than
-a documented, stable free quota - a request can succeed at 1024x576 and 402 a moment
-later at the same size with nothing else changed. A registered POLLINATIONS_TOKEN
-(enter.pollinations.ai) measurably raises the success rate, though not to 100%, and
-must be sent as the query parameter ?token=..., not an Authorization header - tested
-against the live endpoint both ways; the header left every request 402ing exactly as
-if anonymous, the query parameter let most of them through.
+Cloudflare Workers AI (flux-1-schnell) needs a free Cloudflare account, no credit
+card, plus CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN in .env. The free plan
+gives every account 10000 Neurons/day, resetting daily - see
+pipeline/images.py's live per-image measurement for whether that actually covers
+a full video, since Cloudflare's own docs do not list a fixed cost for this model
+and the blog-post figures floating around ("~50-100 neurons per image") turned out,
+same as pollinations before it, to be worth verifying rather than trusting.
 
-pexels is the fallback for stock photography, used only once pollinations has failed
-three attempts for a given prompt. PEXELS_API_KEY from .env; if that key is absent,
-pexels is simply unavailable, not an error.
+pollinations.ai is the fallback once Cloudflare is unavailable or fails. It no
+longer matches its old reputation as "free, no key, just rate-limited": anonymous
+requests intermittently answer HTTP 402 (payment required, an x402 crypto-payment
+scheme), tied to load rather than a documented quota. A POLLINATIONS_TOKEN
+measurably raises the success rate, sent as the query parameter ?token=..., not an
+Authorization header (confirmed against the live endpoint both ways).
+
+Deciding what to do when BOTH fail for one image (duplicate the previous frame
+rather than leave a gap) is pipeline/images.py's job, not this module's: this file
+only knows how to ask each provider for one image and say plainly when that failed.
 """
+import base64
 import json
 import time
 import urllib.error
@@ -29,6 +35,14 @@ log = get_logger("images")
 
 USER_AGENT = "yt-factory/1.0"
 
+# --- cloudflare workers ai -------------------------------------------------
+
+CLOUDFLARE_API_BASE = "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{model}"
+CLOUDFLARE_MODEL = "@cf/black-forest-labs/flux-1-schnell"
+CLOUDFLARE_STEPS = 4   # this model's own max is 4; more steps is not accepted
+
+# --- pollinations ------------------------------------------------------------
+
 POLLINATIONS_BASE = "https://image.pollinations.ai/prompt/{prompt}"
 DEFAULT_WIDTH = 1920
 DEFAULT_HEIGHT = 1080
@@ -36,15 +50,94 @@ DEFAULT_MODEL = "flux"
 DEFAULT_DELAY_S = 16
 POLLINATIONS_ATTEMPTS = 3
 
-PEXELS_SEARCH_URL = "https://api.pexels.com/v1/search"
-# Pexels' own documented free-tier caps: 200 requests/hour, 20000/month. Not enforced
-# here (Pexels enforces it server-side and answers 429), just for anyone reading this.
-PEXELS_REQUESTS_PER_HOUR = 200
-PEXELS_REQUESTS_PER_MONTH = 20000
-
 
 class ImageError(Exception):
     pass
+
+
+# --- cloudflare --------------------------------------------------------------
+
+def cloudflare_available():
+    return bool(get_key("CLOUDFLARE_ACCOUNT_ID")) and bool(get_key("CLOUDFLARE_API_TOKEN"))
+
+
+def cloudflare_settings(cfg):
+    block = ((cfg.get("images") or {}).get("cloudflare")) or {}
+    return {"model": block.get("model", CLOUDFLARE_MODEL),
+           "steps": block.get("steps", CLOUDFLARE_STEPS)}
+
+
+def synthesize_cloudflare(prompt, out_path, seed, cfg):
+    """One image from Cloudflare Workers AI. Returns (path, neurons_used_or_None):
+    the neuron figure is whatever the response body actually contains, under
+    whichever key name it turns out to use - not assumed, read live once real
+    credentials exist."""
+    account_id = get_key("CLOUDFLARE_ACCOUNT_ID")
+    token = get_key("CLOUDFLARE_API_TOKEN")
+    if not account_id or not token:
+        raise ImageError("CLOUDFLARE_ACCOUNT_ID / CLOUDFLARE_API_TOKEN not set in .env")
+
+    settings = cloudflare_settings(cfg)
+    url = CLOUDFLARE_API_BASE.format(account_id=account_id, model=settings["model"])
+    body = json.dumps({"prompt": prompt, "seed": seed, "steps": settings["steps"]}).encode()
+    req = urllib.request.Request(url, data=body, method="POST", headers={
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {token}",
+        "User-Agent": USER_AGENT,
+    })
+
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            raw = resp.read()
+    except urllib.error.HTTPError as e:
+        detail = e.read()[:300]
+        if e.code in (401, 403):
+            raise ImageError(f"cloudflare auth rejected (HTTP {e.code}): check "
+                             f"CLOUDFLARE_ACCOUNT_ID and the token's permissions "
+                             f"({detail})") from e
+        raise ImageError(f"cloudflare HTTP {e.code}: {detail}") from e
+    except urllib.error.URLError as e:
+        raise ImageError(f"cloudflare network error: {e.reason}") from e
+
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise ImageError(f"cloudflare returned non-JSON ({len(raw)} bytes)") from e
+
+    if not payload.get("success", True) and payload.get("errors"):
+        raise ImageError(f"cloudflare reported errors: {payload['errors']}")
+
+    result = payload.get("result") or {}
+    image_b64 = result.get("image")
+    if not image_b64:
+        raise ImageError(f"cloudflare response had no image field: "
+                         f"{str(payload)[:200]}")
+    if image_b64.startswith("data:"):
+        image_b64 = image_b64.split(",", 1)[1]
+
+    try:
+        data = base64.b64decode(image_b64)
+    except (ValueError, base64.binascii.Error) as e:
+        raise ImageError(f"cloudflare image field was not valid base64: {e}") from e
+    if len(data) < 1000:
+        raise ImageError(f"cloudflare image decoded to only {len(data)} bytes")
+
+    # Read whatever usage/cost figure the response actually carries, under
+    # whichever key it turns out to use, rather than assuming one shape.
+    neurons = None
+    for container in (payload, result, payload.get("usage") or {}, result.get("usage") or {}):
+        for key in ("neurons", "neuron_count", "cost", "usage"):
+            value = container.get(key) if isinstance(container, dict) else None
+            if isinstance(value, (int, float)):
+                neurons = value
+                break
+        if neurons is not None:
+            break
+
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_bytes(data)
+    return out_path, neurons
 
 
 # --- pollinations --------------------------------------------------------------
@@ -97,9 +190,9 @@ def synthesize_pollinations(prompt, out_path, seed, cfg):
         body = e.read()[:200]
         if e.code == 402:
             raise ImageError(
-                "pollinations answered 402 Payment Required. Anonymous access is no "
-                "longer reliably free; get a token at enter.pollinations.ai and set "
-                "POLLINATIONS_TOKEN in .env, or rely on the pexels fallback.") from e
+                "pollinations answered 402 Payment Required (known to happen even "
+                "with a valid token when their own service is under strain - see "
+                "pollinations/pollinations#10028).") from e
         raise ImageError(f"pollinations HTTP {e.code}: {body}") from e
     except urllib.error.URLError as e:
         raise ImageError(f"pollinations network error: {e.reason}") from e
@@ -114,88 +207,47 @@ def synthesize_pollinations(prompt, out_path, seed, cfg):
     return out_path
 
 
-# --- pexels ----------------------------------------------------------------------
-
-def pexels_available():
-    return get_key("PEXELS_API_KEY") is not None
-
-
-def synthesize_pexels(prompt, out_path, cfg):
-    """One stock photo from Pexels matching prompt. Raises if no key or no match."""
-    key = get_key("PEXELS_API_KEY")
-    if not key:
-        raise ImageError("PEXELS_API_KEY is not set; pexels is unavailable")
-
-    settings = (cfg.get("images") or {}).get("pexels") or {}
-    per_page = settings.get("per_page", 1)
-    # Pexels searches literal keywords, not a scene-illustration prompt; the style
-    # suffix core/prompts.py appends ("cinematic painterly illustration...") would
-    # just pollute the search, so only the descriptive part before it is used.
-    query = prompt.split(",")[0].strip() or prompt
-    params = urllib.parse.urlencode(
-        {"query": query, "orientation": "landscape", "per_page": per_page})
-    req = urllib.request.Request(f"{PEXELS_SEARCH_URL}?{params}",
-                                 headers={"Authorization": key, "User-Agent": USER_AGENT})
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        if e.code == 429:
-            raise ImageError("pexels rate limit hit (200/hour, 20000/month)") from e
-        raise ImageError(f"pexels HTTP {e.code}: {e.read()[:200]}") from e
-    except urllib.error.URLError as e:
-        raise ImageError(f"pexels network error: {e.reason}") from e
-
-    photos = data.get("photos") or []
-    if not photos:
-        raise ImageError(f"pexels found no photo for: {query[:80]!r}")
-
-    image_url = photos[0]["src"]["large2x"]
-    img_req = urllib.request.Request(image_url, headers={"User-Agent": USER_AGENT})
-    try:
-        with urllib.request.urlopen(img_req, timeout=60) as resp:
-            data = resp.read()
-    except urllib.error.URLError as e:
-        raise ImageError(f"pexels image download failed: {e.reason}") from e
-
-    out_path = Path(out_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_bytes(data)
-    return out_path, photos[0].get("photographer")
-
-
-# --- combined ----------------------------------------------------------------
+# --- combined ------------------------------------------------------------------
 
 def images_per_scene(duration_s, images_per_seconds):
     return max(1, round(duration_s / images_per_seconds))
 
 
 def synthesize(prompt, out_path, seed, cfg):
-    """Pollinations first (POLLINATIONS_ATTEMPTS tries), pexels once it has failed
-    that many times and a key is available. Raises ImageError only once nothing
-    worked, naming the last error from whichever provider was tried last."""
-    provider = (cfg.get("images") or {}).get("provider", "pollinations")
+    """Cloudflare first, pollinations second - that IS the "cloudflare" default, a
+    cascade, not an exclusive choice. "cloudflare-only" skips the pollinations leg
+    (useful when isolating a neuron measurement); "pollinations" skips straight past
+    Cloudflare (useful if its credentials are being debugged). Raises ImageError
+    only once whatever is allowed has been tried; the caller decides what to do next
+    (pipeline/images.py duplicates the previous frame rather than leaving a gap).
+
+    Returns (provider, neurons_or_None).
+    """
+    provider_pref = (cfg.get("images") or {}).get("provider", "cloudflare")
+    try_cloudflare = provider_pref in ("cloudflare", "cloudflare-only")
+    try_pollinations = provider_pref in ("cloudflare", "pollinations")
     last_error = None
 
-    if provider in ("pollinations", "auto"):
+    if try_cloudflare and cloudflare_available():
+        try:
+            _, neurons = synthesize_cloudflare(prompt, out_path, seed, cfg)
+            return "cloudflare", neurons
+        except ImageError as e:
+            last_error = e
+            log.warning("cloudflare failed: %s", e)
+    elif try_cloudflare:
+        log.warning("cloudflare unavailable (CLOUDFLARE_ACCOUNT_ID/"
+                    "CLOUDFLARE_API_TOKEN not set)%s", "; trying pollinations"
+                    if try_pollinations else "")
+
+    if try_pollinations:
         for attempt in range(1, POLLINATIONS_ATTEMPTS + 1):
             try:
                 synthesize_pollinations(prompt, out_path, seed, cfg)
-                return "pollinations"
+                return "pollinations", None
             except ImageError as e:
                 last_error = e
                 log.warning("pollinations attempt %d/%d failed: %s",
                            attempt, POLLINATIONS_ATTEMPTS, e)
-
-    if pexels_available():
-        try:
-            path, photographer = synthesize_pexels(prompt, out_path, cfg)
-            log.info("pexels photo by %s", photographer or "unknown")
-            return "pexels"
-        except ImageError as e:
-            last_error = e
-            log.warning("pexels failed: %s", e)
-    elif provider == "pollinations":
-        log.warning("pexels unavailable (no PEXELS_API_KEY); nothing left to try")
 
     raise ImageError(str(last_error) if last_error else "no image provider available")
