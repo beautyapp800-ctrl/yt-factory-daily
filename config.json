@@ -38,5 +38,18 @@
       "bitrate_kbps": 192
     }
   },
-  "image_style": "cinematic painterly illustration, muted earth tones, marble and weathered stone, soft volumetric light, quiet atmosphere, no text, no lettering, no watermark, no modern branding"
+  "image_style": "cinematic painterly illustration, muted earth tones, marble and weathered stone, soft volumetric light, quiet atmosphere, no text, no lettering, no watermark, no modern branding",
+  "images": {
+    "provider": "pollinations",
+    "images_per_seconds": 12,
+    "pollinations": {
+      "width": 1920,
+      "height": 1080,
+      "model": "flux",
+      "delay_s": 16
+    },
+    "pexels": {
+      "per_page": 1
+    }
+  }
 }

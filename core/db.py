@@ -33,6 +33,17 @@ CREATE TABLE IF NOT EXISTS scenes (
     audio_path TEXT,
     duration_s REAL
 );
+CREATE TABLE IF NOT EXISTS scene_images (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    video_id INTEGER NOT NULL REFERENCES videos(id),
+    scene_id INTEGER NOT NULL REFERENCES scenes(id),
+    idx INTEGER NOT NULL,
+    prompt TEXT,
+    seed INTEGER,
+    provider TEXT,
+    path TEXT,
+    created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS tics (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     video_id INTEGER NOT NULL REFERENCES videos(id),
@@ -149,6 +160,35 @@ def update_scene(scene_id, **fields):
 def get_scenes(video_id):
     with _connect() as conn:
         rows = conn.execute("SELECT * FROM scenes WHERE video_id = ? ORDER BY idx", (video_id,))
+        return [dict(r) for r in rows]
+
+
+def clear_scene_images(video_id):
+    """Drop a video's images so a regenerated set does not pile up on the old one."""
+    with _connect() as conn:
+        conn.execute("DELETE FROM scene_images WHERE video_id = ?", (video_id,))
+
+
+def add_scene_image(video_id, scene_id, idx, prompt=None, seed=None, provider=None, path=None):
+    with _connect() as conn:
+        cur = conn.execute(
+            "INSERT INTO scene_images (video_id, scene_id, idx, prompt, seed, provider, "
+            "path, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (video_id, scene_id, idx, prompt, seed, provider, path, _now()))
+        return cur.lastrowid
+
+
+def get_scene_images(scene_id):
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM scene_images WHERE scene_id = ? ORDER BY idx", (scene_id,))
+        return [dict(r) for r in rows]
+
+
+def get_video_images(video_id):
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM scene_images WHERE video_id = ? ORDER BY scene_id, idx", (video_id,))
         return [dict(r) for r in rows]
 
 
