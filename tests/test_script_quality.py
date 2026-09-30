@@ -108,8 +108,58 @@ def test_duplicate_openings():
           "openings differing only by a number count as the same")
 
 
+def test_domain_diversity():
+    print("test_domain_diversity")
+    digital = [{"title": f"Stop Checking Your Phone Again {i}",
+                "focus": "About scrolling the feed and answering email."} for i in range(5)]
+    problems = sc.domain_complaints(digital)
+    check(problems, "five lessons in one domain are rejected")
+    check("digital habits" in problems[0], "the complaint names the crowded domain")
+    check("work" in problems[0] and "family" in problems[0],
+          "the complaint lists the domains to use instead")
+    spread = [{"title": "Stop Explaining Your Work", "focus": "About your boss at the office."},
+              {"title": "Stop Carrying Family Debt", "focus": "About your mother and the past."},
+              {"title": "Drop the Money Story", "focus": "About rent and savings."}]
+    check(not sc.domain_complaints(spread), "a plan spread across domains is accepted")
+
+
+def test_forbidden_opening_prefixes():
+    print("test_forbidden_opening_prefixes")
+    frag = sc._avoid_openings(["You stand in the kitchen and wait.", "You sit at the desk."])
+    check('do not begin with "you stand in"' in frag, "the banned word sequence is stated")
+    check('do not begin with "you sit at"' in frag, "each clashing prefix is listed")
+    check(sc._avoid_openings([]) == "", "no openings means no fragment")
+
+
+def test_name_tics():
+    print("test_name_tics")
+    parts = {("hook", 0): "Maya waits. Then Maya speaks. Maya again.",
+             ("lesson", 0): "Later Maya calls. Tomas says nothing."}
+    sc.swap_overused_names(parts, avoid=["Nadia"])
+    joined = " ".join(parts.values())
+    check("Maya" not in joined, "a name used four times is replaced")
+    check(joined.count("Tomas") == 1,
+          "the replacement does not collide with a name already in the text")
+    check("Nadia" not in joined, "a name recent videos used is not chosen")
+
+    kept = {("hook", 0): "You wait. Then Tomas speaks once."}
+    sc.swap_overused_names(kept, avoid=[])
+    check("Tomas" in kept[("hook", 0)], "a name used once is left alone")
+
+    check(("colour", "teal") in sc.collect_tics("You wait in a teal coat by the door."),
+          "a rare colour word is recorded as a tic")
+
+
+def test_outro_target():
+    print("test_outro_target")
+    check(sc.OUTRO_WORDS == 140, "the outro target matches what the model actually returns")
+    check(sc.OPENING_REWRITES == 2, "a clashing opening gets two attempts")
+
+
 if __name__ == "__main__":
     for test in (test_title_ban, test_trimming, test_trim_to_budget,
-                 test_hook_preview_detector, test_duplicate_openings):
+                 test_hook_preview_detector, test_duplicate_openings,
+                 test_domain_diversity, test_forbidden_opening_prefixes,
+                 test_name_tics, test_outro_target):
         test()
     print("ALL SCRIPT QUALITY TESTS PASSED")

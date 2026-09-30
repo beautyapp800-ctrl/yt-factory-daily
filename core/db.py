@@ -33,6 +33,13 @@ CREATE TABLE IF NOT EXISTS scenes (
     audio_path TEXT,
     duration_s REAL
 );
+CREATE TABLE IF NOT EXISTS tics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    video_id INTEGER NOT NULL REFERENCES videos(id),
+    kind TEXT NOT NULL,
+    value TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     video_id INTEGER,
@@ -157,3 +164,27 @@ def seed_counts():
         rows = conn.execute(
             "SELECT seed, COUNT(*) AS n FROM videos WHERE seed IS NOT NULL GROUP BY seed")
         return {r["seed"]: r["n"] for r in rows}
+
+
+def add_tics(video_id, pairs):
+    """Record the proper names and colour words one video used, for later videos to avoid."""
+    rows = [(video_id, kind, value, _now()) for kind, value in dict.fromkeys(pairs)]
+    if not rows:
+        return
+    with _connect() as conn:
+        conn.execute("DELETE FROM tics WHERE video_id = ?", (video_id,))
+        conn.executemany(
+            "INSERT INTO tics (video_id, kind, value, created_at) VALUES (?, ?, ?, ?)", rows)
+
+
+def recent_tics(videos=10):
+    """Names and colours used by the last `videos` videos, as {kind: [value, ...]}."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT kind, value FROM tics WHERE video_id IN "
+            "(SELECT id FROM videos ORDER BY id DESC LIMIT ?) ORDER BY kind, value",
+            (videos,)).fetchall()
+    out = {}
+    for row in rows:
+        out.setdefault(row["kind"], []).append(row["value"])
+    return out

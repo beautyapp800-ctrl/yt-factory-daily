@@ -75,6 +75,8 @@ JSON only."""
         raise ValueError(f"concept missing keys: {', '.join(missing)}")
     concept["topic"] = " ".join(str(concept["topic"]).split()).strip(" .\"'")
     concept["seed"] = seed["theme"]
+    # The script stage anchors all ten lessons to these, so they have to travel with it.
+    concept["angle_hints"] = seed.get("angle_hints", [])
     return concept
 
 

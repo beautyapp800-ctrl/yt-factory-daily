@@ -72,8 +72,10 @@ def main():
     lessons = outline.get("lessons", [])
 
     print("=" * WIDTH)
-    print(f"VIDEO {video_id}   status: {video['status']}   seed: {video['seed'] or '-'}")
+    print(f"VIDEO {video_id}   status: {video['status']}")
     print(f"TITLE   {video['title'] or '(none yet)'}")
+    # Seed directly under the title: drift away from it is the failure to watch for.
+    print(f"SEED    {video['seed'] or '-'}")
     print(f"TOPIC   {video['topic']}")
     if outline:
         print(f"SIZE    {outline.get('total_words', '?')} words, "

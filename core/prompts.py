@@ -115,3 +115,56 @@ from a lesson already written above.
 
 Do not open by stating a clock time. A precise hour in the first sentence is its own
 formula, as tired as opening in a kitchen. Let the place and what is happening carry it."""
+
+
+# Which life area a lesson belongs to. Used to reject a plan that piles most of its
+# lessons into one area: seed "control" once produced five lessons about phones.
+DOMAINS = {
+    "digital habits": [
+        "phone", "screen", "social media", "instagram", "facebook", "tiktok", "feed",
+        "scroll", "scrolling", "notification", "text", "text message", "texting", "texts", "replying", "reply",
+        "email", "emails", "inbox", "app", "apps", "online", "post", "posting",
+        "likes", "followers", "tablet", "laptop", "message", "messages", "dm",
+    ],
+    "work": ["work", "job", "boss", "colleague", "coworker", "career", "office",
+             "meeting", "promotion", "deadline", "interview", "shift", "client"],
+    "family": ["family", "mother", "father", "parent", "parents", "child", "children",
+               "son", "daughter", "sibling", "brother", "sister", "spouse", "partner",
+               "marriage", "husband", "wife"],
+    "money": ["money", "salary", "wage", "debt", "rent", "spending", "savings",
+              "afford", "expensive", "cost", "price", "budget", "bill", "bills"],
+    "the body": ["body", "sleep", "sleeping", "eating", "food", "exercise", "gym",
+                 "tired", "exhaustion", "illness", "pain", "breath", "breathing"],
+    "friendship": ["friend", "friends", "friendship", "neighbour", "neighbor",
+                   "stranger", "strangers", "acquaintance", "company", "invitation"],
+    "the past": ["past", "memory", "memories", "regret", "regrets", "mistake",
+                 "mistakes", "years ago", "childhood", "used to", "history", "grudge"],
+}
+MAX_LESSONS_PER_DOMAIN = 4
+
+
+def domain_of(text):
+    """The life area a lesson sits in, by keyword hits. None when nothing matches."""
+    low = f" {(text or '').lower()} "
+    best, best_hits = None, 0
+    for domain, words in DOMAINS.items():
+        hits = sum(1 for w in words if f" {w} " in low or f" {w}," in low or f" {w}." in low)
+        if hits > best_hits:
+            best, best_hits = domain, hits
+    return best
+
+
+def forbidden_tics_rule(names, colours):
+    """Prompt fragment listing the words earlier videos already leaned on."""
+    if not names and not colours:
+        return ""
+    parts = []
+    if names:
+        parts.append("these names, every one of which a recent video already used: "
+                     + ", ".join(sorted(names)))
+    if colours:
+        parts.append("these colour words, worn out by recent videos: "
+                     + ", ".join(sorted(colours)))
+    return ("\n\nDo not use " + "; nor ".join(parts) +
+            ".\nPick different names and plainer colours. If you need a name, choose one "
+            "that is not in that list.")

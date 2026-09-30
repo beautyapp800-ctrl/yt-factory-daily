@@ -16,15 +16,17 @@ from core import db, text as txt
 from core.config import output_dir
 from core.llm import complete, complete_json
 from core.logger import get_logger
-from core.prompts import (CONCRETE_DETAIL_RULE, EXAMPLE_TITLES, IMAGE_SYSTEM,
-                          LESSON_FORM_RULES,
+from core.prompts import (CONCRETE_DETAIL_RULE, DOMAINS, EXAMPLE_TITLES, IMAGE_SYSTEM,
+                          LESSON_FORM_RULES, MAX_LESSONS_PER_DOMAIN,
                           NARRATION_SYSTEM, OUTLINE_SYSTEM, SCENE_SETTINGS,
-                          TITLE_BANNED_WORDS)
+                          TITLE_BANNED_WORDS, domain_of, forbidden_tics_rule)
 
 log = get_logger("script")
 
 HOOK_WORDS = 200
-OUTRO_WORDS = 200
+# 140, not 200: the model gave 126, 142 and 159 across three runs whatever it was
+# asked for, and a short close is not a fault, so the budget now matches reality.
+OUTRO_WORDS = 140
 WORD_TOLERANCE = 0.15          # total script must land within +/-15% of budget
 # Ordering 340 for a wanted 395 (ratio 0.86) landed video 4 at 3710 words, twelve words
 # above the floor that fails the whole script: with the tighter prompts the model stopped
@@ -42,6 +44,9 @@ LESSONS_PER_FIX_ROUND = 5
 OUTLINE_ATTEMPTS = 3
 MAX_HOOK_TITLE_HITS = 2        # a hook naming more titles than this is previewing
 OPENING_WORDS = 4              # parts sharing this many opening words clash
+OPENING_REWRITES = 2           # attempts to shift a clashing opening before giving up
+MAX_NAME_USES = 3              # a name used more than this is swapped for another
+TICS_FROM_VIDEOS = 10          # how far back to look for names and colours to avoid
 
 
 def ordered_words(actual_target):
@@ -73,13 +78,32 @@ def title_problems(title, strict=True):
     return problems
 
 
-def _outline_prompt(concept, cfg, lesson_count, complaints=()):
+def _outline_prompt(concept, cfg, lesson_count, complaints=(), tics=""):
+    seed = concept.get("seed") or ""
+    hints = concept.get("angle_hints") or []
+    anchor = ""
+    if seed:
+        listed = "; ".join(hints)
+        anchor = f"""
+
+THE STOIC IDEA THIS VIDEO IS ABOUT: {seed}
+Angles that belong to it: {listed}
+
+Every one of the {lesson_count} lessons has to work directly on {seed} as the Stoics
+meant it. A lesson that would fit equally well in a video about any other idea does not
+belong here. "Become calmer", "be more present" and "build better habits" are not about
+{seed} and are not acceptable. If you cannot tie a lesson back to {seed} in one sentence,
+replace it.
+
+Spread them across a life: work, family, money, the body, friendship, the past. Do not
+let the whole video become one subject."""
+
     prompt = f"""Plan a {cfg['target_duration_min']} minute video about {concept['topic']}.
 
 The promise to the viewer: {concept['promise']}
-What keeps it fresh: {concept['different']}
+What keeps it fresh: {concept['different']}{anchor}
 
-{LESSON_FORM_RULES}
+{LESSON_FORM_RULES}{tics}
 
 Return JSON with exactly these keys:
 "title": the video title. Examples of the format this channel uses:
@@ -102,10 +126,26 @@ JSON only."""
     return prompt
 
 
-def make_outline(concept, cfg, lesson_count):
+def domain_complaints(lessons):
+    """Reject a plan that crowds most of its lessons into one area of life."""
+    tally = {}
+    for lesson in lessons:
+        domain = domain_of(f"{lesson['title']} {lesson.get('focus', '')}")
+        if domain:
+            tally[domain] = tally.get(domain, 0) + 1
+    problems = []
+    for domain, count in sorted(tally.items(), key=lambda kv: -kv[1]):
+        if count > MAX_LESSONS_PER_DOMAIN:
+            others = ", ".join(d for d in DOMAINS if d != domain)
+            problems.append(f"too many lessons about {domain} ({count} of {len(lessons)}); "
+                            f"give lessons about {others} instead")
+    return problems
+
+
+def make_outline(concept, cfg, lesson_count, tics=""):
     complaints = []
     for attempt in range(1, OUTLINE_ATTEMPTS + 1):
-        outline = complete_json(_outline_prompt(concept, cfg, lesson_count, complaints),
+        outline = complete_json(_outline_prompt(concept, cfg, lesson_count, complaints, tics),
                                 system=OUTLINE_SYSTEM, max_tokens=2500, temperature=0.85)
         lessons = outline.get("lessons") or []
         if len(lessons) != lesson_count:
@@ -124,6 +164,7 @@ def make_outline(concept, cfg, lesson_count):
             complaints += title_problems(lesson["title"])
         # The video title carries a leading number, so only the word ban applies.
         complaints += title_problems(outline["title"], strict=False)
+        complaints += domain_complaints(lessons)
         if not complaints:
             return outline
         log.warning("outline attempt %d/%d rejected: %s", attempt, OUTLINE_ATTEMPTS,
@@ -136,21 +177,32 @@ def make_outline(concept, cfg, lesson_count):
 # --- shared prompt fragments ----------------------------------------------
 
 def _avoid_openings(openings):
+    """Name the exact word sequences already used, not the whole sentences.
+
+    Handing over full sentences told the model what to avoid writing about; what it
+    kept repeating was the construction. The forbidden first words are the thing to
+    state, so they are listed on their own as well.
+    """
     if not openings:
         return ""
+    prefixes = sorted({txt.opening_words(o, 3) for o in openings if o.strip()})
     listed = "\n".join(f"  - {o}" for o in openings)
+    banned = "\n".join(f'  - do not begin with "{p}"' for p in prefixes if p)
     return f"""
 
-These are the opening sentences of the parts already written:
+These word sequences are already used by parts of this video. Your first sentence must
+not begin with any of them:
+{banned}
+
+For context, those parts open like this:
 {listed}
-Do not start like any of them. Do not reuse their place, their time of day, or the
-shape of their first sentence. If they open on a person sitting somewhere, do not
-open on a person sitting somewhere."""
+Do not reuse their place, their time of day, or the shape of their first sentence. If
+they open on a person standing or sitting somewhere, open on something else entirely."""
 
 
 # --- stage B: hook --------------------------------------------------------
 
-def write_hook(concept, cfg, setting, openings=()):
+def write_hook(concept, cfg, setting, openings=(), tics=""):
     """Deliberately given no lesson list: it previewed all ten when it had one."""
     prompt = f"""The subject of this video: {concept['topic']}
 The promise to the viewer: {concept['promise']}
@@ -163,7 +215,7 @@ way to stand inside this.
 
 Never preview, list, number or summarise what the video will cover. You are not being
 told what the lessons are, and you must not guess at them. No greeting, no welcome, no
-channel name, no phrase like in this video or by the end.{_avoid_openings(openings)}
+channel name, no phrase like in this video or by the end.{tics}{_avoid_openings(openings)}
 
 Narration only."""
     return txt.clean(complete(prompt, system=NARRATION_SYSTEM,
@@ -172,7 +224,7 @@ Narration only."""
 
 # --- stage C: lessons and outro -------------------------------------------
 
-def write_lesson(index, outline, written, target_words, cfg, setting, openings=()):
+def write_lesson(index, outline, written, target_words, cfg, setting, openings=(), tics=""):
     """One lesson. Gets the whole plan plus what is already written, to avoid repeats."""
     lesson = outline["lessons"][index]
     plan = "\n".join(f"{i}. {l['title']}: {l.get('focus', '')}"
@@ -204,7 +256,7 @@ This lesson is a refusal, not a new habit. You are taking something away from th
 viewer. Never hand them a tool, a list, a log or a routine.
 
 Do not name the lesson number. Do not write the lesson title as a heading.
-Start straight into the situation.{_avoid_openings(openings)}
+Start straight into the situation.{tics}{_avoid_openings(openings)}
 
 Narration only."""
 
@@ -222,7 +274,7 @@ Narration only."""
     return body
 
 
-def write_outro(outline, cfg, openings=()):
+def write_outro(outline, cfg, openings=(), tics=""):
     titles = ", ".join(l["title"] for l in outline["lessons"])
     prompt = f"""Video title: {outline['title']}
 The lessons just covered: {titles}
@@ -232,7 +284,7 @@ Write the ending of this video, about {ordered_words(OUTRO_WORDS)} words.
 Pull the lessons into one idea, without listing them again. Leave the viewer with one
 thing to carry into tomorrow. Then a short, quiet invitation to subscribe if the video
 was worth their time, no more than two sentences, no enthusiasm, no asking for likes or
-comments or the bell.{_avoid_openings(openings)}
+comments or the bell.{tics}{_avoid_openings(openings)}
 
 Narration only."""
     return txt.clean(complete(prompt, system=NARRATION_SYSTEM,
@@ -251,6 +303,41 @@ def _label(key):
     return kind if kind != "lesson" else f"lesson {index + 1}"
 
 
+# --- model tics -----------------------------------------------------------
+
+def swap_overused_names(parts, avoid):
+    """Replace any name used more than MAX_NAME_USES times with an unused one.
+
+    Done in code rather than by asking again: the model returns to its favourite names
+    whatever the prompt says, and a find-and-replace costs nothing.
+    """
+    full = " ".join(parts.values())
+    counts = txt.proper_names(full)
+    # Collision check over every capitalised word, not just the confirmed names: a name
+    # that only ever opens a sentence is invisible to proper_names() and would otherwise
+    # be handed out as a replacement for the name being removed.
+    taken = {w.lower() for w in txt.capitalised_words(full)} | {a.lower() for a in avoid}
+    spare = [n for n in txt.NAME_POOL if n.lower() not in taken]
+
+    for name, uses in sorted(counts.items(), key=lambda kv: -kv[1]):
+        if uses <= MAX_NAME_USES:
+            continue
+        if not spare:
+            log.warning("%s used %d times but no replacement name is left", name, uses)
+            break
+        replacement = spare.pop(0)
+        log.info("%s appears %d times, replacing it with %s", name, uses, replacement)
+        for key, body in parts.items():
+            parts[key] = txt.replace_name(body, name, replacement)
+
+
+def collect_tics(text):
+    """The (kind, value) pairs worth remembering so later videos avoid them."""
+    pairs = [("name", n) for n in txt.proper_names(text)]
+    pairs += [("colour", c) for c in txt.colours_used(text)]
+    return pairs
+
+
 def fix_duplicate_openings(parts, order, regenerate):
     """Rewrite the later of any two parts that open with the same four words."""
     seen = {}
@@ -261,11 +348,17 @@ def fix_duplicate_openings(parts, order, regenerate):
         if opener in seen:
             log.warning("%s opens like %s (%s), rewriting the later one",
                         _label(key), _label(seen[opener]), opener)
-            openings = [first_sentence(parts[k]) for k in order if k != key and parts.get(k)]
-            parts[key] = regenerate(key, openings)
-            opener = txt.opening_words(parts[key], OPENING_WORDS)
+            for attempt in range(1, OPENING_REWRITES + 1):
+                openings = [first_sentence(parts[k]) for k in order
+                            if k != key and parts.get(k)]
+                parts[key] = regenerate(key, openings)
+                opener = txt.opening_words(parts[key], OPENING_WORDS)
+                if opener not in seen:
+                    log.info("%s now opens differently (%s)", _label(key), opener)
+                    break
+                log.warning("%s still opens the same way after rewrite %d/%d",
+                            _label(key), attempt, OPENING_REWRITES)
             if opener in seen:
-                log.warning("%s still opens the same way after a rewrite", _label(key))
                 continue
         seen[opener] = key
 
@@ -460,8 +553,14 @@ def run(video_id, cfg):
     log.info("word budget %d (~%d per lesson wanted, ordering %d)",
              budget, per_lesson, ordered_words(per_lesson))
 
+    seen = db.recent_tics(TICS_FROM_VIDEOS)
+    tics = forbidden_tics_rule(seen.get("name", []), seen.get("colour", []))
+    if seen:
+        log.info("avoiding %d names and %d colour words from recent videos",
+                 len(seen.get("name", [])), len(seen.get("colour", [])))
+
     log.info("stage A: outline")
-    outline = make_outline(concept, cfg, lesson_count)
+    outline = make_outline(concept, cfg, lesson_count, tics)
     log.info("title: %s", outline["title"])
 
     # One distinct setting per part, so ten lessons do not share a kitchen.
@@ -477,16 +576,16 @@ def run(video_id, cfg):
         if spare:
             settings[index if kind == "lesson" else "hook"] = spare.pop(0)
         if kind == "hook":
-            return write_hook(concept, cfg, settings["hook"], openings)
+            return write_hook(concept, cfg, settings["hook"], openings, tics)
         if kind == "outro":
-            return write_outro(outline, cfg, openings)
+            return write_outro(outline, cfg, openings, tics)
         written = {j: parts[("lesson", j)] for j in range(lesson_count)
                    if j != index and ("lesson", j) in parts}
         return write_lesson(index, outline, written, target or per_lesson, cfg,
-                            settings[index], openings)
+                            settings[index], openings, tics)
 
     log.info("stage B: hook (written first, with no sight of the lessons)")
-    parts[("hook", 0)] = write_hook(concept, cfg, settings["hook"])
+    parts[("hook", 0)] = write_hook(concept, cfg, settings["hook"], tics=tics)
     log.info("hook %d words, opens: %s", txt.word_count(parts[("hook", 0)]),
              txt.opening_words(parts[("hook", 0)], 6))
 
@@ -496,14 +595,14 @@ def run(video_id, cfg):
         openings = [first_sentence(parts[("hook", 0)])]
         openings += [first_sentence(parts[("lesson", j)]) for j in range(i)]
         parts[("lesson", i)] = write_lesson(i, outline, written, per_lesson, cfg,
-                                            settings[i], openings)
+                                            settings[i], openings, tics)
         log.info("lesson %d/%d: %s (%d words) in %s", i + 1, lesson_count,
                  outline["lessons"][i]["title"], txt.word_count(parts[("lesson", i)]),
                  settings[i])
 
     all_openings = [first_sentence(parts[("hook", 0)])]
     all_openings += [first_sentence(parts[("lesson", i)]) for i in range(lesson_count)]
-    parts[("outro", 0)] = write_outro(outline, cfg, all_openings)
+    parts[("outro", 0)] = write_outro(outline, cfg, all_openings, tics)
     log.info("outro %d words", txt.word_count(parts[("outro", 0)]))
 
     order = [("hook", 0)] + [("lesson", i) for i in range(lesson_count)] + [("outro", 0)]
@@ -521,6 +620,8 @@ def run(video_id, cfg):
                      f"hook previewed {len(hits)} lesson titles, rewritten")
         parts[("hook", 0)] = regenerate(
             ("hook", 0), [first_sentence(parts[("lesson", i)]) for i in range(lesson_count)])
+
+    swap_overused_names(parts, seen.get("name", []))
 
     if not fix_word_count(parts, outline, budget, cfg, regenerate):
         total = sum(txt.word_count(p) for p in parts.values())
@@ -553,6 +654,7 @@ def run(video_id, cfg):
 
     estimated_s = round(total_words * seconds_per_word, 1)
     db.update_video(video_id, title=outline["title"])
+    db.add_tics(video_id, collect_tics(full_text))
 
     out = output_dir(video_id)
     (out / "script.txt").write_text(f"{outline['title']}\n\n{full_text}\n", encoding="utf-8")

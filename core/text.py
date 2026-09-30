@@ -156,3 +156,81 @@ def titles_present_in(text, titles, threshold=0.6):
         if found / len(words) >= threshold:
             hits.append(title)
     return hits
+
+
+# Capitalised words that are not names, so the tic extractor does not ban ordinary
+# nouns it happens to meet mid-sentence.
+_NOT_NAMES = {
+    "i", "i'm", "i'll", "stoic", "stoics", "stoicism", "god", "monday", "tuesday",
+    "wednesday", "thursday", "friday", "saturday", "sunday", "january", "february",
+    "march", "april", "may", "june", "july", "august", "september", "october",
+    "november", "december", "mr", "mrs", "ms", "dr", "st", "lego", "crossfit", "tv",
+    "ok", "okay", "english", "roman", "rome", "greek", "marcus", "aurelius", "seneca",
+    "epictetus", "hospital", "street", "avenue", "road", "station", "monday's",
+    # Openers of quoted speech: split_sentences does not break inside quotation marks,
+    # so these land mid-sentence and would otherwise read as names.
+    "did", "hey", "hello", "why", "what", "when", "where", "how", "who", "yes", "no",
+    "oh", "well", "sorry", "thanks", "look", "listen", "please", "you", "your", "the",
+    "can", "are", "there", "this", "that", "just", "maybe", "let", "don't", "it's",
+}
+
+# Rare colour words the model reaches for over and over. Plain colours are fine.
+COLOUR_WORDS = [
+    "teal", "amber", "crimson", "azure", "ochre", "mauve", "taupe", "sepia", "indigo",
+    "magenta", "turquoise", "beige", "olive", "charcoal", "slate", "ivory", "lavender",
+    "coral", "emerald", "scarlet", "vermilion", "chartreuse", "periwinkle", "russet",
+    "umber", "sienna", "cerulean", "puce", "fuchsia",
+]
+
+# Replacements for a name the model has leaned on too hard.
+NAME_POOL = [
+    "Nadia", "Tomas", "Bea", "Rafi", "Ines", "Dov", "Petra", "Kwame", "Liesel",
+    "Omar", "Sabine", "Hugo", "Mira", "Yusuf", "Freja", "Tariq", "Noor", "Emil",
+]
+
+
+def proper_names(text):
+    """Proper names and how many times each appears.
+
+    Two passes. A word opening a sentence is capitalised by grammar and proves nothing,
+    so candidates are only collected from mid-sentence positions. Every occurrence of a
+    confirmed candidate is then counted, including the sentence-initial ones, or a name
+    that likes to start sentences would be undercounted. Words in _NOT_NAMES, acronyms,
+    and words that also occur lowercase in the same text are dropped as ordinary words.
+    """
+    if not text:
+        return {}
+    lowercase_elsewhere = {w.lower() for w in re.findall(r"\b[a-z][a-z']+\b", text)}
+    candidates = set()
+    for sentence in split_sentences(text):
+        for word in re.findall(r"\b[A-Za-z][A-Za-z']*\b", sentence)[1:]:
+            word = word.split("'")[0]                   # Marion's -> Marion
+            if len(word) < 3 or not word[0].isupper() or word.isupper():
+                continue
+            if word.lower() in _NOT_NAMES or word.lower() in lowercase_elsewhere:
+                continue
+            candidates.add(word)
+    return {name: len(re.findall(rf"\b{re.escape(name)}\b", text)) for name in candidates}
+
+
+def capitalised_words(text):
+    """Every capitalised token, wherever it sits in a sentence.
+
+    Unlike proper_names(), this makes no judgement about what is a name: it exists so a
+    substitution can avoid picking a replacement that already appears in the text. A
+    name that only ever opens sentences is invisible to proper_names() but shows up here.
+    """
+    return {w.split("'")[0] for w in re.findall(r"\b[A-Z][A-Za-z']*\b", text or "")
+            if len(w) > 2 and w.lower() not in _NOT_NAMES and not w.isupper()}
+
+
+def colours_used(text):
+    """Which of the rare colour words this text uses, and how often."""
+    low = (text or "").lower()
+    return {c: len(re.findall(rf"\b{c}\b", low)) for c in COLOUR_WORDS
+            if re.search(rf"\b{c}\b", low)}
+
+
+def replace_name(text, old, new):
+    """Swap one proper name for another, keeping any possessive form intact."""
+    return re.sub(rf"\b{re.escape(old)}\b", new, text)
