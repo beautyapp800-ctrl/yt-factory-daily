@@ -9,6 +9,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+# Keep test output out of the working logs/factory.log.
+import core.logger
+core.logger.LOG_DIR = Path(tempfile.mkdtemp(prefix="yt-factory-test-"))
+
 import run
 from core import db
 from core.logger import get_logger

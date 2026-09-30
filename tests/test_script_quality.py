@@ -4,9 +4,16 @@ No network: the model is stubbed. These lock in the four defects found in video 
 so a later change cannot quietly bring them back.
 """
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+# Point the log at a temp dir before anything calls get_logger(), so a test run does
+# not write into the working logs/factory.log. Left unset, test lines land in the real
+# log and any tool grepping it for failures sees them as production errors.
+import core.logger
+core.logger.LOG_DIR = Path(tempfile.mkdtemp(prefix="yt-factory-test-"))
 
 import core.text as txt
 import pipeline.script as sc
