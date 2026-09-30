@@ -57,6 +57,21 @@ TITLE_BANNED_WORDS = [
     "log", "track", "tracker", "tracking", "benchmark", "review", "reset",
     "system", "routine", "schedule", "optimize", "optimise", "framework",
     "checklist", "habit stack", "habits", "hack", "productivity", "workflow",
+    "steps", "tips", "tricks", "guide",
+]
+
+# The shape every lesson has to take. This is what separates the channel from a
+# self-help listicle: the viewer is asked to subtract, never to add.
+# Titles the model must never hand back: they are in LESSON_FORM_RULES as a
+# demonstration of register, and videos 4 and 5 both returned six of them verbatim as
+# their actual lessons. Enforced in code, because asking was not enough.
+EXAMPLE_TITLES = [
+    "Stop Explaining Your Choices to People Who Are Not Listening",
+    "Quit Auditioning for an Audience That Left",
+    "Stop Rehearsing Speeches You Will Never Give",
+    "Let Go of the Prize Nobody Promised You",
+    "Stop Defending a Door You Already Walked Through",
+    "Drop the Score You Keep Alone",
 ]
 
 # The shape every lesson has to take. This is what separates the channel from a
@@ -71,13 +86,11 @@ has too much. You are taking something away from them, not handing them another 
 
 Titles must be an order or a flat statement, 4 to 8 words, no colon, no numbering.
 
-Six titles in the right register:
-  Stop Explaining Your Decisions to Spectators
-  Quit Auditioning for People Who Already Decided
-  Stop Rehearsing Arguments That Never Happen
-  Let Go of the Outcome You Were Promised
-  Stop Defending a Life You Already Chose
-  Drop the Grudge You Feed Every Morning
+The six titles below come from a DIFFERENT video on an unrelated subject. They are here
+only to show the register. Reusing any of them, or a light rewording of one, is the
+single worst thing you can do here, and the answer will be thrown away. Every title you
+write must name something specific to the subject of THIS video:
+""" + chr(10).join(f"  {t}" for t in EXAMPLE_TITLES) + """
 
 Four titles that are wrong, and why:
   "Use a Daily Thought Log" is wrong: it hands the viewer a new tool, and it is a
@@ -88,6 +101,7 @@ Four titles that are wrong, and why:
     construct a system instead of dropping something.
   "Practice Gratitude Every Morning" is wrong: it is a routine to add, and it could
     open any self-help video ever made."""
+
 
 # What keeps the prose from reading like advice written for nobody in particular.
 CONCRETE_DETAIL_RULE = """One detail in this lesson must be specific enough that it could not appear in

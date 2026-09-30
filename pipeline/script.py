@@ -16,7 +16,8 @@ from core import db, text as txt
 from core.config import output_dir
 from core.llm import complete, complete_json
 from core.logger import get_logger
-from core.prompts import (CONCRETE_DETAIL_RULE, IMAGE_SYSTEM, LESSON_FORM_RULES,
+from core.prompts import (CONCRETE_DETAIL_RULE, EXAMPLE_TITLES, IMAGE_SYSTEM,
+                          LESSON_FORM_RULES,
                           NARRATION_SYSTEM, OUTLINE_SYSTEM, SCENE_SETTINGS,
                           TITLE_BANNED_WORDS)
 
@@ -50,10 +51,16 @@ def ordered_words(actual_target):
 
 # --- stage A ---------------------------------------------------------------
 
+def _normalise_title(title):
+    return re.sub(r"[^a-z ]", "", title.lower()).strip()
+
+
 def title_problems(title, strict=True):
     """Why a lesson title is unusable. An empty list means it passes."""
     problems = []
     low = title.lower()
+    if strict and _normalise_title(title) in {_normalise_title(t) for t in EXAMPLE_TITLES}:
+        problems.append(f'"{title}" is copied straight from the examples in the instructions')
     for banned in TITLE_BANNED_WORDS:
         if re.search(rf"\b{re.escape(banned)}\b", low):
             problems.append(f'"{title}" uses the banned word "{banned}"')
