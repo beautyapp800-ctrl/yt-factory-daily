@@ -25,9 +25,13 @@ log = get_logger("script")
 HOOK_WORDS = 200
 OUTRO_WORDS = 200
 WORD_TOLERANCE = 0.15          # total script must land within +/-15% of budget
-# The model systematically overshoots a word target, so ask for less than we want:
-# 395 wanted x 0.86 is a 340 word order, which comes back near 395.
-ORDER_RATIO = 0.86
+# Ordering 340 for a wanted 395 (ratio 0.86) landed video 4 at 3710 words, twelve words
+# above the floor that fails the whole script: with the tighter prompts the model stopped
+# overshooting and delivered 262-383 words per lesson. The two failure modes cost very
+# different amounts, because trim_to_budget() fixes an over-long script for free while a
+# short one has to be bought back with rewrites, so the order now aims at the full target
+# and lets trimming take back any excess.
+ORDER_RATIO = 1.0
 TRIM_RATIO = 1.20              # a lesson over target by this much is cut, not redone
 MIN_SCENES, MAX_SCENES = 40, 60
 SCENE_TARGET, SCENE_MIN, SCENE_MAX = 92, 75, 110

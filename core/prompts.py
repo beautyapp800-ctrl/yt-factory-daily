@@ -91,6 +91,13 @@ Four titles that are wrong, and why:
 
 # What keeps the prose from reading like advice written for nobody in particular.
 CONCRETE_DETAIL_RULE = """One detail in this lesson must be specific enough that it could not appear in
-generic advice. Not "your coworker" but the coworker who always copies you in and
-never addresses you. Not "you feel anxious" but what your hands are doing while you
-feel it. Name the object, the exact hour, the specific sentence someone said."""
+generic advice. Name the object, name the exact words someone said, or say what your
+hands are doing while you feel it. Not a category of person but a particular one.
+
+Invent that detail fresh for this lesson. Anything written in these instructions is an
+illustration of how specific to be, never material to copy: never write about a
+colleague who copies you into emails, and never reuse a detail, a name or an object
+from a lesson already written above.
+
+Do not open by stating a clock time. A precise hour in the first sentence is its own
+formula, as tired as opening in a kitchen. Let the place and what is happening carry it."""

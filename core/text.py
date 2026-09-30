@@ -44,7 +44,8 @@ def clean(text):
     text = text.replace("—", ", ").replace("–", ", ")
     text = re.sub(r"\s+", " ", text)
     text = re.sub(r"\s+([,.;:!?])", r"\1", text)
-    text = re.sub(r"([,;:])(?=\S)", r"\1 ", text)
+    # Not between digits: a time like 6:15 and a figure like 1,000 must stay intact.
+    text = re.sub(r"(?<!\d)([,;:])(?=\S)", r" ", text)
     return text.strip()
 
 
