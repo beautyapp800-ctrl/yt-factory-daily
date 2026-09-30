@@ -10,6 +10,8 @@ Both providers converge on the same output: a 22050 Hz mono wav file, so the ren
 stage never has to know which one made it.
 """
 import asyncio
+import re
+import shutil
 import subprocess
 import wave
 from pathlib import Path
@@ -20,6 +22,14 @@ from core.retry import retry
 log = get_logger("tts")
 
 VOICES_DIR = Path(__file__).resolve().parent.parent / "assets" / "voices"
+
+FFMPEG_INSTALL_HINT = (
+    "ffmpeg was not found on PATH. On Windows, the easiest fix is:\n"
+    "  winget install Gyan.FFmpeg\n"
+    "then open a new terminal so PATH picks it up. Manual builds are at "
+    "https://www.gyan.dev/ffmpeg/builds/ (download the \"full\" build and add its "
+    "bin\\ folder to PATH)."
+)
 
 DEFAULT_PIPER_VOICE = "en_US-ryan-high"
 DEFAULT_PIPER_LENGTH_SCALE = 1.08
@@ -37,6 +47,29 @@ SAMPLE_RATE = 22050
 
 class TTSError(Exception):
     pass
+
+
+_ffmpeg_checked = False
+
+
+def require_ffmpeg():
+    """Raise a plain, actionable error instead of letting a subprocess call fail
+    somewhere deep in a stack trace."""
+    global _ffmpeg_checked
+    if _ffmpeg_checked:
+        return
+    if shutil.which("ffmpeg") is None:
+        raise TTSError(FFMPEG_INSTALL_HINT)
+    _ffmpeg_checked = True
+
+
+def _run_ffmpeg(args, error_context):
+    require_ffmpeg()
+    result = subprocess.run(["ffmpeg", "-y", "-loglevel", "error"] + args,
+                            capture_output=True, text=True)
+    if result.returncode != 0:
+        raise TTSError(f"{error_context}: {result.stderr.strip()[-400:]}")
+    return result
 
 
 # --- piper -------------------------------------------------------------------
@@ -108,13 +141,8 @@ def synthesize_edge(text, out_path, voice=DEFAULT_EDGE_VOICE, rate=DEFAULT_EDGE_
 
 
 def _mp3_to_wav(src, dst):
-    result = subprocess.run(
-        ["ffmpeg", "-y", "-loglevel", "error", "-i", str(src),
-         "-ar", str(SAMPLE_RATE), "-ac", "1", str(dst)],
-        capture_output=True, text=True)
-    if result.returncode != 0:
-        raise TTSError(f"ffmpeg could not convert edge-tts output to wav: "
-                       f"{result.stderr.strip()[-300:]}")
+    _run_ffmpeg(["-i", str(src), "-ar", str(SAMPLE_RATE), "-ac", "1", str(dst)],
+               "ffmpeg could not convert edge-tts output to wav")
 
 
 # --- shared --------------------------------------------------------------------
@@ -150,17 +178,94 @@ def synthesize(text, out_path, cfg):
 
 
 def concatenate(wav_paths, out_path):
-    """Join scene wav files into one track with ffmpeg's concat demuxer."""
+    """Join wav files (scene wavs, sentence wavs, silence segments - anything at the
+    same sample rate/channels) into one track with ffmpeg's concat demuxer. -c copy
+    requires that match, which holds here because everything is rendered or generated
+    at SAMPLE_RATE mono."""
     out_path = Path(out_path)
-    list_path = out_path.with_suffix(".txt")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    list_path = out_path.with_suffix(".concat.txt")
     list_path.write_text(
         "\n".join(f"file '{Path(p).resolve().as_posix()}'" for p in wav_paths), encoding="utf-8")
-    result = subprocess.run(
-        ["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0",
-         "-i", str(list_path), "-c", "copy", str(out_path)],
-        capture_output=True, text=True)
-    list_path.unlink(missing_ok=True)
-    if result.returncode != 0:
-        raise TTSError(f"ffmpeg could not concatenate {len(wav_paths)} scene files: "
-                       f"{result.stderr.strip()[-300:]}")
+    try:
+        _run_ffmpeg(["-f", "concat", "-safe", "0", "-i", str(list_path), "-c", "copy",
+                    str(out_path)],
+                   f"ffmpeg could not concatenate {len(wav_paths)} audio segments")
+    finally:
+        list_path.unlink(missing_ok=True)
     return wav_duration(out_path)
+
+
+def silence(duration_s, out_path):
+    """A wav file of exactly duration_s of digital silence, at SAMPLE_RATE mono, so
+    it concatenates cleanly with rendered speech via -c copy."""
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    _run_ffmpeg(["-f", "lavfi", "-i", f"anullsrc=r={SAMPLE_RATE}:cl=mono",
+                "-t", f"{duration_s:.3f}", str(out_path)],
+               f"ffmpeg could not generate {duration_s:.3f}s of silence")
+    return out_path
+
+
+def measure_volume(path):
+    """Mean and max volume in dBFS, via ffmpeg's volumedetect filter. Used to catch a
+    file that rendered but is effectively silent (a synthesis failure that still
+    produced a valid, non-empty wav)."""
+    require_ffmpeg()
+    result = subprocess.run(
+        ["ffmpeg", "-i", str(path), "-af", "volumedetect", "-f", "null", "-"],
+        capture_output=True, text=True)
+    mean = re.search(r"mean_volume:\s*(-?[\d.]+)\s*dB", result.stderr)
+    peak = re.search(r"max_volume:\s*(-?[\d.]+)\s*dB", result.stderr)
+    if not mean:
+        raise TTSError(f"ffmpeg volumedetect gave no reading for {path}: "
+                       f"{result.stderr.strip()[-300:]}")
+    return float(mean.group(1)), float(peak.group(1)) if peak else None
+
+
+def master(in_wav, out_mp3, cfg):
+    """Loudness-normalise to YouTube's -14 LUFS, cut the sub-80Hz rumble, upsample to
+    48kHz (Piper's native 22050Hz is too low for YouTube), and export as 192kbps mono
+    mp3. One pass over the whole track, not per scene: normalising each scene on its
+    own would flatten the natural loud/quiet variation between scenes instead of the
+    track as a whole."""
+    settings = mastering_settings(cfg)
+    out_mp3 = Path(out_mp3)
+    out_mp3.parent.mkdir(parents=True, exist_ok=True)
+    filters = (f"highpass=f={settings['highpass_hz']},"
+              f"loudnorm=I={settings['target_lufs']}:TP=-1.5:LRA=11")
+    _run_ffmpeg(["-i", str(in_wav), "-af", filters,
+                "-ar", str(settings["sample_rate"]), "-ac", "1",
+                "-b:a", f"{settings['bitrate_kbps']}k", str(out_mp3)],
+               "ffmpeg could not master the narration track")
+    return out_mp3
+
+
+def extract_sample(in_audio, out_path, seconds):
+    """The first `seconds` of a track, re-encoded (stream copy can misplace the cut
+    point on a compressed format, and the sample has to end exactly on time)."""
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    _run_ffmpeg(["-i", str(in_audio), "-t", str(seconds), "-ar", "48000", "-ac", "1",
+                "-b:a", "192k", str(out_path)],
+               f"ffmpeg could not cut a {seconds}s sample")
+    return out_path
+
+
+def mastering_settings(cfg):
+    block = (cfg.get("tts") or {}).get("mastering") or {}
+    return {
+        "target_lufs": block.get("target_lufs", -14),
+        "highpass_hz": block.get("highpass_hz", 80),
+        "sample_rate": block.get("sample_rate", 48000),
+        "bitrate_kbps": block.get("bitrate_kbps", 192),
+    }
+
+
+def pause_settings(cfg):
+    block = (cfg.get("tts") or {}).get("pauses") or {}
+    return {
+        "sentence_ms": block.get("sentence_ms", 350),
+        "scene_ms": block.get("scene_ms", 700),
+        "lesson_ms": block.get("lesson_ms", 1400),
+    }

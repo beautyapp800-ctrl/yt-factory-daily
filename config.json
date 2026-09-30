@@ -25,6 +25,17 @@
     "edge": {
       "voice": "en-US-GuyNeural",
       "rate": "-8%"
+    },
+    "pauses": {
+      "sentence_ms": 350,
+      "scene_ms": 700,
+      "lesson_ms": 1400
+    },
+    "mastering": {
+      "target_lufs": -14,
+      "highpass_hz": 80,
+      "sample_rate": 48000,
+      "bitrate_kbps": 192
     }
   },
   "image_style": "cinematic painterly illustration, muted earth tones, marble and weathered stone, soft volumetric light, quiet atmosphere, no text, no lettering, no watermark, no modern branding"
