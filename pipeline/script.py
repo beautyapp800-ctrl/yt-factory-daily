@@ -331,10 +331,16 @@ def swap_overused_names(parts, avoid):
             parts[key] = txt.replace_name(body, name, replacement)
 
 
-def collect_tics(text):
-    """The (kind, value) pairs worth remembering so later videos avoid them."""
-    pairs = [("name", n) for n in txt.proper_names(text)]
-    pairs += [("colour", c) for c in txt.colours_used(text)]
+def collect_tics(text, min_uses=2):
+    """The (kind, value) pairs worth remembering so later videos avoid them.
+
+    Only words used at least min_uses times count. A tic is by definition something
+    repeated, and the single-use capitals are mostly false positives: ordinary words
+    that happen to be capitalised after a colon or inside quoted speech, like Prepare
+    or Supplies, which it would be actively harmful to forbid.
+    """
+    pairs = [("name", n) for n, uses in txt.proper_names(text).items() if uses >= min_uses]
+    pairs += [("colour", c) for c, uses in txt.colours_used(text).items() if uses >= min_uses]
     return pairs
 
 

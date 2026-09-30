@@ -146,8 +146,11 @@ def test_name_tics():
     sc.swap_overused_names(kept, avoid=[])
     check("Tomas" in kept[("hook", 0)], "a name used once is left alone")
 
-    check(("colour", "teal") in sc.collect_tics("You wait in a teal coat by the door."),
-          "a rare colour word is recorded as a tic")
+    twice = "You wait in a teal coat. A teal door opens. Tomas nods twice at Tomas."
+    check(("colour", "teal") in sc.collect_tics(twice),
+          "a colour word used twice is recorded as a tic")
+    check(("colour", "teal") not in sc.collect_tics("One teal coat by the door."),
+          "a word used once is not a tic, which is what keeps ordinary capitals out")
 
 
 def test_outro_target():
