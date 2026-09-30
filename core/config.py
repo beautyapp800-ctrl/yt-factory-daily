@@ -16,7 +16,7 @@ def output_dir(video_id):
 REQUIRED_FIELDS = [
     "channel_topic", "language", "target_duration_min", "videos_per_week",
     "publish_time", "timezone", "youtube_publish", "privacy_status",
-    "aspect", "voice", "words_per_minute", "image_style",
+    "aspect", "voice", "words_per_minute", "image_style", "tts",
 ]
 
 

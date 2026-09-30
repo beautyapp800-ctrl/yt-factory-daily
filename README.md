@@ -3,7 +3,7 @@
 Система, яка щодня автоматично робить відео для YouTube-каналу про стоїцизм і
 практичну філософію (англійською, 25–35 хв) і публікує їх.
 
-**Поточний стан:** реалізовано `topic` і `script`. Решта етапів — заглушки.
+**Поточний стан:** реалізовано `topic`, `script` і `tts`. Решта етапів — заглушки.
 
 ## Налаштування
 
@@ -14,6 +14,21 @@ cp .env.example .env
 Далі впиши в `.env` ключ `GROQ_API_KEY` (https://console.groq.com/keys).
 `GEMINI_API_KEY` необовʼязковий: якщо він є, Gemini працює як резерв, якщо ні —
 резерв просто пропускається. Файл `.env` у `.gitignore`, комітити його не можна.
+
+Для озвучення (`tts`) потрібен один із двох провайдерів:
+
+- **piper** (за замовчуванням, офлайн): `pip install piper-tts`, потім завантаж
+  голоси (~236 МБ, у `.gitignore`, не комітяться):
+  ```
+  python -m piper.download_voices --download-dir assets/voices en_US-ryan-high en_GB-alan-medium en_US-joe-medium
+  ```
+- **edge-tts** (хмара Microsoft, безкоштовно, без ключа): `pip install edge-tts`.
+  З деяких серверних IP повертає 403 — це видно в лозі як зрозуміле пояснення,
+  не стектрейс, і означає "спробуй piper на цій машині".
+
+Обирається полем `tts.provider` у `config.json` (`"piper"` або `"edge"`).
+`ffmpeg` має бути в PATH — використовується для конвертації mp3→wav (edge) і для
+склеювання сцен в один `narration.wav`.
 
 ## Запуск
 
@@ -27,13 +42,19 @@ python tests/test_failure_path.py
 
 ## Структура
 
-- `config.json` — налаштування каналу, відео та `image_style` для картинок
+- `config.json` — налаштування каналу, відео, `image_style`, блок `tts`
 - `run.py` — оркестратор (помилка етапу → статус `failed`, процес не падає)
-- `core/` — config, db (SQLite), logger, retry, validate, llm, prompts, text
-- `pipeline/` — етапи: topic, script, images, tts, render, thumbnail, seo, upload
+- `core/` — config, db (SQLite), logger, retry, validate, llm, prompts, text, tts
+- `pipeline/` — етапи: topic, script, tts, images, render, thumbnail, seo, upload
+- `scripts/preview.py` — показує заголовок, засів, уроки й перші речення кожної
+  частини одного відео, без читання 5000 слів
+- `scripts/tts_sample.py` — рендерить один уривок усіма голосами-кандидатами,
+  щоб вибрати голос на слух
 - `assets/topic_seeds.json` — 48 стоїчних тем-засівів
+- `assets/voices/` — моделі Piper (у `.gitignore`, качаються окремо)
 - `data/factory.db` — база (у `.gitignore`)
-- `output/<video_id>/` — `concept.json`, `outline.json`, `script.txt`
+- `output/<video_id>/` — `concept.json`, `outline.json`, `script.txt`,
+  `narration.wav`, `audio/scene_NNN.wav`
 - `logs/factory.log` — лог (у `.gitignore`)
 
 ## Як працює генерація
@@ -64,3 +85,16 @@ python tests/test_failure_path.py
 Якщо слів не вистачає або забагато — перегенеровуються лише найгірші уроки
 (до 3 раундів), а не весь сценарій. Кількість сцен коригується програмно зміною
 цільового розміру сцени.
+
+Кожен урок прив'язаний до теми засіву явно (назва + `angle_hints`), і план
+відкидається, якщо більше 4 з 10 уроків потрапляють в один домен (телефон,
+робота, сім'я...) — щоб 30 відео не зійшлися в узагальнену самодопомогу. Власні
+імена й рідкісні кольори, якими зловживала модель у минулих відео, записуються
+в таблицю `tics` і забороняються в наступних промтах; ім'я, повторене в одному
+відео більше 3 разів, замінюється програмно.
+
+**`pipeline/tts.py`** — кожна сцена озвучується окремо
+(`output/<video_id>/audio/scene_NNN.wav`), потім склеюються в `narration.wav`.
+Реальний темп (слів/хв) вимірюється з готового аудіо і звіряється з
+`config.words_per_minute`; відхилення понад 15% пишеться в лог і в `events`
+як попередження, не як помилка — саме відео при цьому не відкидається.

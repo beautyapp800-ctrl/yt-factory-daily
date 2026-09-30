@@ -16,5 +16,16 @@
     "gemini_model": "gemini-flash-lite",
     "max_rpm": 25
   },
+  "tts": {
+    "provider": "piper",
+    "piper": {
+      "voice": "en_US-ryan-high",
+      "length_scale": 1.08
+    },
+    "edge": {
+      "voice": "en-US-GuyNeural",
+      "rate": "-8%"
+    }
+  },
   "image_style": "cinematic painterly illustration, muted earth tones, marble and weathered stone, soft volumetric light, quiet atmosphere, no text, no lettering, no watermark, no modern branding"
 }

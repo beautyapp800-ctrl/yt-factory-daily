@@ -132,6 +132,20 @@ def clear_scenes(video_id):
         conn.execute("DELETE FROM scenes WHERE video_id = ?", (video_id,))
 
 
+_SCENE_FIELDS = {"text", "image_prompt", "image_path", "audio_path", "duration_s"}
+
+
+def update_scene(scene_id, **fields):
+    if not fields:
+        return
+    bad = set(fields) - _SCENE_FIELDS
+    if bad:
+        raise ValueError(f"Unknown scene fields: {', '.join(sorted(bad))}")
+    sets = ", ".join(f"{k} = ?" for k in fields)
+    with _connect() as conn:
+        conn.execute(f"UPDATE scenes SET {sets} WHERE id = ?", (*fields.values(), scene_id))
+
+
 def get_scenes(video_id):
     with _connect() as conn:
         rows = conn.execute("SELECT * FROM scenes WHERE video_id = ? ORDER BY idx", (video_id,))
