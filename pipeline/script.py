@@ -43,6 +43,10 @@ MAX_FIX_ROUNDS = 3
 LESSONS_PER_FIX_ROUND = 5
 OUTLINE_ATTEMPTS = 3
 MAX_HOOK_TITLE_HITS = 2        # a hook naming more titles than this is previewing
+# Fraction of the runtime reserved for pause silence (sentence/scene/lesson gaps),
+# not available for speaking. words_per_minute is a measured rate with no pauses in
+# it, so the raw budget has to shrink by this much to still fit target_duration_min.
+PAUSE_RESERVE_RATIO = 0.07
 OPENING_WORDS = 4              # parts sharing this many opening words clash
 OPENING_REWRITES = 2           # attempts to shift a clashing opening before giving up
 MAX_NAME_USES = 3              # a name used more than this is swapped for another
@@ -554,10 +558,16 @@ def run(video_id, cfg):
         log.warning("no concept.json, working from the topic in the database: %s", topic)
 
     lesson_count = int(cfg.get("lessons_per_video", 10))
-    budget = int(cfg["target_duration_min"]) * int(cfg["words_per_minute"])
+    # words_per_minute is a measured speaking rate (see scripts/calibrate_tempo.py),
+    # not counting the silence our own pause system adds between sentences, scenes
+    # and lessons. PAUSE_RESERVE_RATIO of the runtime goes to that silence, so the
+    # word budget is shrunk by the same fraction to still land in target_duration_min.
+    raw_budget = int(cfg["target_duration_min"]) * int(cfg["words_per_minute"])
+    budget = round(raw_budget * (1 - PAUSE_RESERVE_RATIO))
     per_lesson = max(200, round((budget - HOOK_WORDS - OUTRO_WORDS) / lesson_count))
-    log.info("word budget %d (~%d per lesson wanted, ordering %d)",
-             budget, per_lesson, ordered_words(per_lesson))
+    log.info("word budget %d (%d wpm minus %.0f%% for pauses; ~%d per lesson wanted, "
+             "ordering %d)", budget, cfg["words_per_minute"], PAUSE_RESERVE_RATIO * 100,
+             per_lesson, ordered_words(per_lesson))
 
     seen = db.recent_tics(TICS_FROM_VIDEOS)
     tics = forbidden_tics_rule(seen.get("name", []), seen.get("colour", []))

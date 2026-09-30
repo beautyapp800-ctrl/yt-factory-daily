@@ -9,7 +9,7 @@
   "privacy_status": "private",
   "aspect": "16:9",
   "voice": "en_US-ryan-high",
-  "words_per_minute": 145,
+  "words_per_minute": 179,
   "lessons_per_video": 10,
   "llm": {
     "groq_model": "openai/gpt-oss-120b",
@@ -17,14 +17,14 @@
     "max_rpm": 25
   },
   "tts": {
-    "provider": "piper",
+    "provider": "edge",
     "piper": {
       "voice": "en_US-ryan-high",
       "length_scale": 1.08
     },
     "edge": {
       "voice": "en-US-GuyNeural",
-      "rate": "-8%"
+      "rate": "-5%"
     },
     "pauses": {
       "sentence_ms": 350,
