@@ -43,8 +43,10 @@ def test_trimming():
     check(trimmed.rstrip().endswith("."), "trimming stops on a sentence boundary")
     check(txt.word_count(txt.trim_to_words("Short text here.", 100)) == 3,
           "text already inside the limit is untouched")
-    check(sc.ordered_words(395) == 340,
-          "395 wanted words are ordered as 340, to absorb the overshoot")
+    # Over-long is trimmed for free, short has to be bought back with rewrites, so the
+    # order aims at the full target rather than under it.
+    check(sc.ordered_words(395) == 395, "the word order is not discounted below the target")
+    check(sc.ordered_words(10) == 180, "a tiny target is floored at 180 words")
 
 
 def test_trim_to_budget():
