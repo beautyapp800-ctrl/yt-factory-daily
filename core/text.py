@@ -105,3 +105,53 @@ def split_scenes(text, target=92, minimum=75, maximum=110):
         else:
             scenes.append(tail)
     return scenes
+
+
+# Words too common to signal that a lesson title is being previewed. Every title
+# opens with one of stop/quit/drop/let go, so those cannot count as evidence.
+_TITLE_STOPWORDS = {
+    "the", "a", "an", "your", "you", "yours", "to", "of", "that", "this", "and",
+    "for", "in", "on", "at", "it", "is", "are", "be", "with", "from", "who",
+    "what", "already", "every", "own", "stop", "quit", "let", "go", "drop",
+    "give", "up", "keep", "have", "has", "do", "not",
+}
+
+
+def opening_words(text, count=4):
+    """The first `count` words, lowercased, for spotting two parts that open alike."""
+    words = re.findall(r"[A-Za-z']+", text or "")
+    return " ".join(w.lower() for w in words[:count])
+
+
+def trim_to_words(text, max_words):
+    """Drop whole sentences off the end until the text fits inside max_words.
+
+    Sentence granularity, not paragraph: clean() has already folded the narration
+    into one continuous block for the speech synthesizer, so paragraph boundaries
+    no longer exist by the time a lesson is measured. Never cuts mid-sentence.
+    """
+    if word_count(text) <= max_words:
+        return text
+    kept, total = [], 0
+    for sentence in split_sentences(text):
+        words = word_count(sentence)
+        if kept and total + words > max_words:
+            break
+        kept.append(sentence)
+        total += words
+    return " ".join(kept) if kept else text
+
+
+def titles_present_in(text, titles, threshold=0.6):
+    """Which of `titles` the text appears to preview, by content-word overlap."""
+    low = (text or "").lower()
+    hits = []
+    for title in titles:
+        words = [w for w in re.findall(r"[a-z']+", title.lower())
+                 if w not in _TITLE_STOPWORDS and len(w) > 2]
+        if len(words) < 2:
+            continue
+        found = sum(1 for w in words if w in low)
+        if found / len(words) >= threshold:
+            hits.append(title)
+    return hits

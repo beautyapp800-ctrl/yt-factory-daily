@@ -1,70 +1,167 @@
 """Stage 2: full narration script, built in four stages instead of one request.
 
-A: outline (title, promise, lesson titles)
-B: each lesson as its own request
-C: hook and outro
+A: outline (title, promise, lesson titles), with the refusal/subtraction form enforced
+B: hook, written before the lessons so every lesson can be told not to echo it
+C: each lesson as its own request, in its own setting
 D: programmatic scene split, then image prompts in batches
+
+Openings are tracked across every part: two parts starting with the same four words
+is treated as a defect and the later one is rewritten.
 """
 import json
+import random
+import re
 
 from core import db, text as txt
 from core.config import output_dir
 from core.llm import complete, complete_json
 from core.logger import get_logger
-from core.prompts import IMAGE_SYSTEM, NARRATION_SYSTEM, OUTLINE_SYSTEM
+from core.prompts import (CONCRETE_DETAIL_RULE, IMAGE_SYSTEM, LESSON_FORM_RULES,
+                          NARRATION_SYSTEM, OUTLINE_SYSTEM, SCENE_SETTINGS,
+                          TITLE_BANNED_WORDS)
 
 log = get_logger("script")
 
 HOOK_WORDS = 200
 OUTRO_WORDS = 200
 WORD_TOLERANCE = 0.15          # total script must land within +/-15% of budget
+# The model systematically overshoots a word target, so ask for less than we want:
+# 395 wanted x 0.86 is a 340 word order, which comes back near 395.
+ORDER_RATIO = 0.86
+TRIM_RATIO = 1.20              # a lesson over target by this much is cut, not redone
 MIN_SCENES, MAX_SCENES = 40, 60
 SCENE_TARGET, SCENE_MIN, SCENE_MAX = 92, 75, 110
 IMAGE_BATCH = 10
 MAX_FIX_ROUNDS = 3
 LESSONS_PER_FIX_ROUND = 5
+OUTLINE_ATTEMPTS = 3
+MAX_HOOK_TITLE_HITS = 2        # a hook naming more titles than this is previewing
+OPENING_WORDS = 4              # parts sharing this many opening words clash
+
+
+def ordered_words(actual_target):
+    """Turn the word count we want into the smaller number we ask the model for."""
+    return max(180, round(actual_target * ORDER_RATIO))
 
 
 # --- stage A ---------------------------------------------------------------
 
-def make_outline(concept, cfg, lesson_count):
+def title_problems(title, strict=True):
+    """Why a lesson title is unusable. An empty list means it passes."""
+    problems = []
+    low = title.lower()
+    for banned in TITLE_BANNED_WORDS:
+        if re.search(rf"\b{re.escape(banned)}\b", low):
+            problems.append(f'"{title}" uses the banned word "{banned}"')
+    if strict:
+        words = title.split()
+        if not 4 <= len(words) <= 8:
+            problems.append(f'"{title}" is {len(words)} words, needs 4 to 8')
+        if ":" in title:
+            problems.append(f'"{title}" contains a colon')
+    return problems
+
+
+def _outline_prompt(concept, cfg, lesson_count, complaints=()):
     prompt = f"""Plan a {cfg['target_duration_min']} minute video about {concept['topic']}.
 
 The promise to the viewer: {concept['promise']}
 What keeps it fresh: {concept['different']}
 
+{LESSON_FORM_RULES}
+
 Return JSON with exactly these keys:
-"title": the video title, in the format this channel uses. Examples of the format:
-  "10 Stoic Lessons That Will Make You Mentally Unbreakable"
-  "10 Things You Should Quietly Remove From Your Life"
+"title": the video title. Examples of the format this channel uses:
+  10 Stoic Lessons That Will Make You Mentally Unbreakable
+  10 Things You Should Quietly Remove From Your Life
   Start with {lesson_count}. Under 70 characters. No colon, no subtitle.
 "promise": one sentence, what the viewer walks away able to do.
 "lessons": an array of exactly {lesson_count} objects, each with
-   "title": 3 to 8 words naming the lesson, and
-   "focus": one sentence on the specific situation this lesson covers.
+   "title": the lesson title, following the rules above, and
+   "focus": one sentence naming the specific thing being refused or dropped.
 
 The lessons must be concrete and clearly different from each other. No two may
-cover the same move in different words. Order them so the video builds.
+refuse the same thing in different words. Order them so the video builds.
 
 JSON only."""
-    outline = complete_json(prompt, system=OUTLINE_SYSTEM, max_tokens=2000, temperature=0.85)
-    lessons = outline.get("lessons") or []
-    if len(lessons) != lesson_count:
-        raise ValueError(f"outline has {len(lessons)} lessons, expected {lesson_count}")
-    for i, lesson in enumerate(lessons, 1):
-        if not str(lesson.get("title", "")).strip():
-            raise ValueError(f"lesson {i} has no title")
-        lesson["title"] = txt.clean(str(lesson["title"]))
-        lesson["focus"] = txt.clean(str(lesson.get("focus", "")))
-    outline["title"] = txt.clean(str(outline.get("title", ""))).strip(" .")
-    if not outline["title"]:
-        raise ValueError("outline has no title")
-    return outline
+    if complaints:
+        listed = "\n".join(f"- {c}" for c in complaints)
+        prompt += ("\n\nYour previous attempt was rejected. Fix every one of these and "
+                   f"do not introduce new violations:\n{listed}")
+    return prompt
 
 
-# --- stage B ---------------------------------------------------------------
+def make_outline(concept, cfg, lesson_count):
+    complaints = []
+    for attempt in range(1, OUTLINE_ATTEMPTS + 1):
+        outline = complete_json(_outline_prompt(concept, cfg, lesson_count, complaints),
+                                system=OUTLINE_SYSTEM, max_tokens=2500, temperature=0.85)
+        lessons = outline.get("lessons") or []
+        if len(lessons) != lesson_count:
+            raise ValueError(f"outline has {len(lessons)} lessons, expected {lesson_count}")
+        for i, lesson in enumerate(lessons, 1):
+            if not str(lesson.get("title", "")).strip():
+                raise ValueError(f"lesson {i} has no title")
+            lesson["title"] = txt.clean(str(lesson["title"])).strip(" .")
+            lesson["focus"] = txt.clean(str(lesson.get("focus", "")))
+        outline["title"] = txt.clean(str(outline.get("title", ""))).strip(" .")
+        if not outline["title"]:
+            raise ValueError("outline has no title")
 
-def write_lesson(index, outline, written, target_words, cfg):
+        complaints = []
+        for lesson in lessons:
+            complaints += title_problems(lesson["title"])
+        # The video title carries a leading number, so only the word ban applies.
+        complaints += title_problems(outline["title"], strict=False)
+        if not complaints:
+            return outline
+        log.warning("outline attempt %d/%d rejected: %s", attempt, OUTLINE_ATTEMPTS,
+                    "; ".join(complaints[:4]))
+
+    raise RuntimeError("outline still breaks the title rules after "
+                       f"{OUTLINE_ATTEMPTS} attempts: {complaints[0]}")
+
+
+# --- shared prompt fragments ----------------------------------------------
+
+def _avoid_openings(openings):
+    if not openings:
+        return ""
+    listed = "\n".join(f"  - {o}" for o in openings)
+    return f"""
+
+These are the opening sentences of the parts already written:
+{listed}
+Do not start like any of them. Do not reuse their place, their time of day, or the
+shape of their first sentence. If they open on a person sitting somewhere, do not
+open on a person sitting somewhere."""
+
+
+# --- stage B: hook --------------------------------------------------------
+
+def write_hook(concept, cfg, setting, openings=()):
+    """Deliberately given no lesson list: it previewed all ten when it had one."""
+    prompt = f"""The subject of this video: {concept['topic']}
+The promise to the viewer: {concept['promise']}
+
+Write the opening of this video, about {ordered_words(HOOK_WORDS)} words.
+
+Open inside one situation, in one place, at one hour: {setting}. Two sentences in, the
+viewer has to recognise themselves in it. Then turn hard, and say that there is another
+way to stand inside this.
+
+Never preview, list, number or summarise what the video will cover. You are not being
+told what the lessons are, and you must not guess at them. No greeting, no welcome, no
+channel name, no phrase like in this video or by the end.{_avoid_openings(openings)}
+
+Narration only."""
+    return txt.clean(complete(prompt, system=NARRATION_SYSTEM,
+                              max_tokens=HOOK_WORDS * 6, temperature=0.9))
+
+
+# --- stage C: lessons and outro -------------------------------------------
+
+def write_lesson(index, outline, written, target_words, cfg, setting, openings=()):
     """One lesson. Gets the whole plan plus what is already written, to avoid repeats."""
     lesson = outline["lessons"][index]
     plan = "\n".join(f"{i}. {l['title']}: {l.get('focus', '')}"
@@ -81,55 +178,85 @@ The full plan of {len(outline['lessons'])} lessons:
 Already written, do not repeat these points, examples or phrasings:
 {already}
 
-Now write lesson {index + 1}, "{lesson['title']}". Focus: {lesson.get('focus', '')}
+Now write lesson {index + 1}, {lesson['title']}. Focus: {lesson.get('focus', '')}
 
-About {target_words} words. Build it in three movements, with no labels or breaks between them:
-First, one concrete everyday situation the viewer recognises. A specific moment, a real
-room, a real hour of the day. Not a category of problem.
+About {ordered_words(target_words)} words. Build it in three movements, with no labels
+or breaks between them:
+First, one concrete situation the viewer recognises, set here: {setting}. That is where
+this happens. Not a kitchen and not a morning unless the setting says so.
 Then the Stoic principle that cuts through it, in plain language.
-Then one thing to do tomorrow morning, specific enough to actually do.
+Then one thing to stop doing tomorrow, specific enough to actually do.
+
+{CONCRETE_DETAIL_RULE}
+
+This lesson is a refusal, not a new habit. You are taking something away from the
+viewer. Never hand them a tool, a list, a log or a routine.
 
 Do not name the lesson number. Do not write the lesson title as a heading.
-Start straight into the situation. Narration only."""
+Start straight into the situation.{_avoid_openings(openings)}
+
+Narration only."""
 
     # x6, not x2: reasoning models spend part of the ceiling before the prose starts.
     raw = complete(prompt, system=NARRATION_SYSTEM,
                    max_tokens=int(target_words * 6), temperature=0.85)
-    return txt.clean(raw)
+    body = txt.clean(raw)
+
+    # Over target by more than TRIM_RATIO: cut it instead of paying for a rewrite.
+    limit = int(target_words * TRIM_RATIO)
+    if txt.word_count(body) > limit:
+        was = txt.word_count(body)
+        body = txt.trim_to_words(body, limit)
+        log.info("lesson %d trimmed from %d to %d words", index + 1, was, txt.word_count(body))
+    return body
 
 
-# --- stage C ---------------------------------------------------------------
-
-def write_hook(outline, cfg):
-    prompt = f"""Video title: {outline['title']}
-Promise: {outline['promise']}
-The lessons ahead: {', '.join(l['title'] for l in outline['lessons'])}
-
-Write the opening of this video, about {HOOK_WORDS} words.
-
-The first two sentences have to hold someone who is one thumb-scroll from leaving.
-Open on a specific moment they know, at a specific time of day. No greeting, no
-welcome, no channel name, no "in this video". Do not list what is coming.
-Name the tension, then promise that there is a way to stand inside it.
-Narration only."""
-    return txt.clean(complete(prompt, system=NARRATION_SYSTEM,
-                              max_tokens=HOOK_WORDS * 6, temperature=0.9))
-
-
-def write_outro(outline, cfg):
+def write_outro(outline, cfg, openings=()):
     titles = ", ".join(l["title"] for l in outline["lessons"])
     prompt = f"""Video title: {outline['title']}
 The lessons just covered: {titles}
 
-Write the ending of this video, about {OUTRO_WORDS} words.
+Write the ending of this video, about {ordered_words(OUTRO_WORDS)} words.
 
-Pull the lessons into one idea, without listing them again. Leave the viewer with
-one thing to carry into tomorrow. Then a short, quiet invitation to subscribe if
-the video was worth their time, no more than two sentences, no enthusiasm, no
-asking for likes or comments or the bell.
+Pull the lessons into one idea, without listing them again. Leave the viewer with one
+thing to carry into tomorrow. Then a short, quiet invitation to subscribe if the video
+was worth their time, no more than two sentences, no enthusiasm, no asking for likes or
+comments or the bell.{_avoid_openings(openings)}
+
 Narration only."""
     return txt.clean(complete(prompt, system=NARRATION_SYSTEM,
                               max_tokens=OUTRO_WORDS * 6, temperature=0.85))
+
+
+# --- opening diversity ----------------------------------------------------
+
+def first_sentence(text):
+    sentences = txt.split_sentences(text)
+    return sentences[0] if sentences else ""
+
+
+def _label(key):
+    kind, index = key
+    return kind if kind != "lesson" else f"lesson {index + 1}"
+
+
+def fix_duplicate_openings(parts, order, regenerate):
+    """Rewrite the later of any two parts that open with the same four words."""
+    seen = {}
+    for key in order:
+        opener = txt.opening_words(parts[key], OPENING_WORDS)
+        if not opener:
+            continue
+        if opener in seen:
+            log.warning("%s opens like %s (%s), rewriting the later one",
+                        _label(key), _label(seen[opener]), opener)
+            openings = [first_sentence(parts[k]) for k in order if k != key and parts.get(k)]
+            parts[key] = regenerate(key, openings)
+            opener = txt.opening_words(parts[key], OPENING_WORDS)
+            if opener in seen:
+                log.warning("%s still opens the same way after a rewrite", _label(key))
+                continue
+        seen[opener] = key
 
 
 # --- stage D ---------------------------------------------------------------
@@ -145,9 +272,8 @@ def build_scenes(full_text):
     retarget = max(40, min(200, round(total / wanted)))
     log.warning("scene split gave %d scenes (want %d-%d), retrying with target %d words",
                 len(scenes), MIN_SCENES, MAX_SCENES, retarget)
-    scenes = txt.split_scenes(full_text, retarget,
-                              max(30, int(retarget * 0.8)), int(retarget * 1.25))
-    return scenes
+    return txt.split_scenes(full_text, retarget,
+                            max(30, int(retarget * 0.8)), int(retarget * 1.25))
 
 
 def add_image_prompts(scenes, cfg, outline):
@@ -161,7 +287,8 @@ def add_image_prompts(scenes, cfg, outline):
             try:
                 got = _ask_image_batch(batch, start, outline)
             except (ValueError, KeyError) as e:
-                log.warning("image batch at scene %d failed (attempt %d): %s", start + 1, attempt, e)
+                log.warning("image batch at scene %d failed (attempt %d): %s",
+                            start + 1, attempt, e)
                 continue
             for offset in range(len(batch)):
                 value = got.get(start + offset)
@@ -170,12 +297,11 @@ def add_image_prompts(scenes, cfg, outline):
             if all(prompts[start:start + len(batch)]):
                 break
 
-    # Anything still missing gets a plain prompt built from the video's own subject,
-    # so a scene is never left without one.
+    # Anything still missing gets a plain prompt, so a scene is never left without one.
     for i, value in enumerate(prompts):
         if not value:
             log.warning("scene %d got no image prompt, using the fallback", i + 1)
-            prompts[i] = (f"empty stone courtyard at dawn, a single worn wooden bench, "
+            prompts[i] = ("empty stone courtyard at dawn, a single worn wooden bench, "
                           f"long shadows across the flagstones, {style}")
     return prompts
 
@@ -183,8 +309,8 @@ def add_image_prompts(scenes, cfg, outline):
 def _ask_image_batch(batch, start, outline):
     listed = "\n\n".join(f"SCENE {start + i + 1}:\n{scene}" for i, scene in enumerate(batch))
     prompt = f"""These are consecutive scenes from the narration of a video titled
-"{outline['title']}". Write one image prompt for each scene, illustrating what that
-scene talks about.
+{outline['title']}. Write one image prompt for each scene, illustrating what that scene
+talks about.
 
 {listed}
 
@@ -228,35 +354,72 @@ def check_scenes(scenes, prompts):
     return problems
 
 
-def fix_word_count(parts, outline, budget, cfg):
-    """Regenerate only the lessons that push the total out of range, not the whole script.
+def _total_words(parts):
+    return sum(txt.word_count(p) for p in parts.values())
 
-    Each round aims the lessons at a uniform target that would put the total on the
-    budget itself, then rewrites the few lessons furthest from that target.
+
+def trim_to_budget(parts, lesson_count, max_total):
+    """Cut the longest lessons until the whole script fits inside max_total.
+
+    Caps every lesson at the highest length that makes the total fit, so the long
+    lessons give up words and the short ones are left alone. Trimming is free and
+    exact, which a rewrite is not: asking the model for fewer words just produces
+    another overshoot, so an over-long script is never regenerated.
     """
+    if _total_words(parts) <= max_total:
+        return
+    lengths = [txt.word_count(parts[("lesson", i)]) for i in range(lesson_count)]
+    fixed = _total_words(parts) - sum(lengths)
+
+    low, high = 60, max(lengths)
+    while low < high:
+        cap = (low + high + 1) // 2
+        if fixed + sum(min(n, cap) for n in lengths) <= max_total:
+            low = cap
+        else:
+            high = cap - 1
+    cap = low
+
+    for i in range(lesson_count):
+        was = txt.word_count(parts[("lesson", i)])
+        if was > cap:
+            parts[("lesson", i)] = txt.trim_to_words(parts[("lesson", i)], cap)
+            log.info("trimmed lesson %d from %d to %d words", i + 1, was,
+                     txt.word_count(parts[("lesson", i)]))
+
+
+def fix_word_count(parts, outline, budget, cfg, regenerate):
+    """Bring the script inside the budget: trim when it is too long, rewrite when short."""
     lesson_count = len(outline["lessons"])
     low, high = budget * (1 - WORD_TOLERANCE), budget * (1 + WORD_TOLERANCE)
 
+    if _total_words(parts) > high:
+        log.warning("%d words is over the %d ceiling, trimming to the %d budget",
+                    _total_words(parts), round(high), budget)
+        trim_to_budget(parts, lesson_count, budget)
+        log.info("after trimming: %d words", _total_words(parts))
+
+    # Only a rewrite can add words, so a short script is the one case worth paying for.
     for round_no in range(1, MAX_FIX_ROUNDS + 1):
-        total = sum(txt.word_count(p) for p in parts.values())
-        if low <= total <= high:
-            return True
+        total = _total_words(parts)
+        if total >= low:
+            break
         fixed = txt.word_count(parts[("hook", 0)]) + txt.word_count(parts[("outro", 0)])
         per_lesson = max(200, round((budget - fixed) / lesson_count))
-        log.warning("round %d: %d words, need %d-%d, aiming lessons at %d words each",
-                    round_no, total, round(low), round(high), per_lesson)
+        log.warning("round %d: %d words, need at least %d, aiming lessons at %d words each",
+                    round_no, total, round(low), per_lesson)
 
-        worst = sorted(range(lesson_count),
-                       key=lambda i: abs(txt.word_count(parts[("lesson", i)]) - per_lesson),
-                       reverse=True)[:LESSONS_PER_FIX_ROUND]
-        written = {j: parts[("lesson", j)] for j in range(lesson_count)}
-        for index in worst:
+        shortest = sorted(range(lesson_count),
+                          key=lambda i: txt.word_count(parts[("lesson", i)])
+                          )[:LESSONS_PER_FIX_ROUND]
+        for index in shortest:
             was = txt.word_count(parts[("lesson", index)])
             log.info("regenerating lesson %d: %d words -> ~%d", index + 1, was, per_lesson)
-            context = {k: v for k, v in written.items() if k != index}
-            parts[("lesson", index)] = write_lesson(index, outline, context, per_lesson, cfg)
+            parts[("lesson", index)] = regenerate(("lesson", index), (), per_lesson)
+        if _total_words(parts) > high:
+            trim_to_budget(parts, lesson_count, budget)
 
-    return low <= sum(txt.word_count(p) for p in parts.values()) <= high
+    return low <= _total_words(parts) <= high
 
 
 # --- assembly --------------------------------------------------------------
@@ -283,27 +446,72 @@ def run(video_id, cfg):
     lesson_count = int(cfg.get("lessons_per_video", 10))
     budget = int(cfg["target_duration_min"]) * int(cfg["words_per_minute"])
     per_lesson = max(200, round((budget - HOOK_WORDS - OUTRO_WORDS) / lesson_count))
-    log.info("word budget %d (~%d per lesson across %d lessons)", budget, per_lesson, lesson_count)
+    log.info("word budget %d (~%d per lesson wanted, ordering %d)",
+             budget, per_lesson, ordered_words(per_lesson))
 
     log.info("stage A: outline")
     outline = make_outline(concept, cfg, lesson_count)
     log.info("title: %s", outline["title"])
 
+    # One distinct setting per part, so ten lessons do not share a kitchen.
+    pool = random.sample(SCENE_SETTINGS, min(len(SCENE_SETTINGS), lesson_count + 1))
+    settings = {"hook": pool[0], **{i: pool[i + 1] for i in range(lesson_count)}}
+    spare = [s for s in SCENE_SETTINGS if s not in pool]
+
     parts = {}
-    log.info("stage B: %d lessons", lesson_count)
+
+    def regenerate(key, openings=(), target=None):
+        """Rewrite one part, in a fresh setting when one is left, with an optional target."""
+        kind, index = key
+        if spare:
+            settings[index if kind == "lesson" else "hook"] = spare.pop(0)
+        if kind == "hook":
+            return write_hook(concept, cfg, settings["hook"], openings)
+        if kind == "outro":
+            return write_outro(outline, cfg, openings)
+        written = {j: parts[("lesson", j)] for j in range(lesson_count)
+                   if j != index and ("lesson", j) in parts}
+        return write_lesson(index, outline, written, target or per_lesson, cfg,
+                            settings[index], openings)
+
+    log.info("stage B: hook (written first, with no sight of the lessons)")
+    parts[("hook", 0)] = write_hook(concept, cfg, settings["hook"])
+    log.info("hook %d words, opens: %s", txt.word_count(parts[("hook", 0)]),
+             txt.opening_words(parts[("hook", 0)], 6))
+
+    log.info("stage C: %d lessons, then the outro", lesson_count)
     for i in range(lesson_count):
         written = {j: parts[("lesson", j)] for j in range(i)}
-        parts[("lesson", i)] = write_lesson(i, outline, written, per_lesson, cfg)
-        log.info("lesson %d/%d: %s (%d words)", i + 1, lesson_count,
-                 outline["lessons"][i]["title"], txt.word_count(parts[("lesson", i)]))
+        openings = [first_sentence(parts[("hook", 0)])]
+        openings += [first_sentence(parts[("lesson", j)]) for j in range(i)]
+        parts[("lesson", i)] = write_lesson(i, outline, written, per_lesson, cfg,
+                                            settings[i], openings)
+        log.info("lesson %d/%d: %s (%d words) in %s", i + 1, lesson_count,
+                 outline["lessons"][i]["title"], txt.word_count(parts[("lesson", i)]),
+                 settings[i])
 
-    log.info("stage C: hook and outro")
-    parts[("hook", 0)] = write_hook(outline, cfg)
-    parts[("outro", 0)] = write_outro(outline, cfg)
-    log.info("hook %d words, outro %d words",
-             txt.word_count(parts[("hook", 0)]), txt.word_count(parts[("outro", 0)]))
+    all_openings = [first_sentence(parts[("hook", 0)])]
+    all_openings += [first_sentence(parts[("lesson", i)]) for i in range(lesson_count)]
+    parts[("outro", 0)] = write_outro(outline, cfg, all_openings)
+    log.info("outro %d words", txt.word_count(parts[("outro", 0)]))
 
-    if not fix_word_count(parts, outline, budget, cfg):
+    order = [("hook", 0)] + [("lesson", i) for i in range(lesson_count)] + [("outro", 0)]
+    fix_duplicate_openings(parts, order, lambda key, openings: regenerate(key, openings))
+
+    # A hook naming the lessons is previewing them, which it was told not to do.
+    titles = [l["title"] for l in outline["lessons"]]
+    for attempt in (1, 2):
+        hits = txt.titles_present_in(parts[("hook", 0)], titles)
+        if len(hits) <= MAX_HOOK_TITLE_HITS:
+            break
+        log.warning("hook previews %d lesson titles (%s), rewriting it",
+                    len(hits), "; ".join(hits[:3]))
+        db.log_event(video_id, "script", "warning",
+                     f"hook previewed {len(hits)} lesson titles, rewritten")
+        parts[("hook", 0)] = regenerate(
+            ("hook", 0), [first_sentence(parts[("lesson", i)]) for i in range(lesson_count)])
+
+    if not fix_word_count(parts, outline, budget, cfg, regenerate):
         total = sum(txt.word_count(p) for p in parts.values())
         raise RuntimeError(f"script is {total} words, outside 15% of the {budget} word budget")
 
@@ -336,13 +544,13 @@ def run(video_id, cfg):
     db.update_video(video_id, title=outline["title"])
 
     out = output_dir(video_id)
-    (out / "script.txt").write_text(
-        f"{outline['title']}\n\n{full_text}\n", encoding="utf-8")
+    (out / "script.txt").write_text(f"{outline['title']}\n\n{full_text}\n", encoding="utf-8")
     (out / "outline.json").write_text(
         json.dumps({**outline, "concept": concept, "word_budget": budget,
                     "total_words": total_words, "scene_count": len(scenes),
-                    "estimated_duration_s": estimated_s}, indent=2, ensure_ascii=False),
-        encoding="utf-8")
+                    "estimated_duration_s": estimated_s,
+                    "settings": {str(k): v for k, v in settings.items()}},
+                   indent=2, ensure_ascii=False), encoding="utf-8")
 
     log.info("done: %d words, %d scenes, ~%.1f min", total_words, len(scenes), estimated_s / 60)
     db.log_event(video_id, "script", "info",

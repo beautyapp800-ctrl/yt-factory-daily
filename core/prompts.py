@@ -1,4 +1,4 @@
-"""System prompts and the channel's style rules, kept in one place."""
+"""System prompts, the channel's style rules and the lesson-form spec."""
 
 # Every narration request carries these rules. They are the channel's voice.
 STYLE_RULES = """You write narration for a YouTube channel about Stoicism and practical philosophy.
@@ -30,3 +30,67 @@ Rules for every prompt:
 - Do not add a style description; the pipeline appends one.
 
 Reply with valid JSON only."""
+
+# Distinct places for the opening situation of each lesson, so ten lessons do not
+# all open in a kitchen in the morning. One is assigned per lesson.
+SCENE_SETTINGS = [
+    "a queue in a pharmacy",
+    "a conversation inside a parked car",
+    "a hospital corridor",
+    "a text exchange at two in the morning",
+    "a gym, between sets",
+    "a funeral, or the hour after one",
+    "a job interview",
+    "a child's room",
+    "a railway station",
+    "a shop on the way home from work",
+    "a stairwell outside a flat",
+    "a kitchen late at night, everyone else asleep",
+    "the driver's seat before going inside",
+    "a waiting room with a muted television",
+    "a lift with one other person in it",
+]
+
+# Words that drag a title into time-management territory. Enforced in code, not
+# only asked for, because the model reaches for them by default.
+TITLE_BANNED_WORDS = [
+    "log", "track", "tracker", "tracking", "benchmark", "review", "reset",
+    "system", "routine", "schedule", "optimize", "optimise", "framework",
+    "checklist", "habit stack", "habits", "hack", "productivity", "workflow",
+]
+
+# The shape every lesson has to take. This is what separates the channel from a
+# self-help listicle: the viewer is asked to subtract, never to add.
+LESSON_FORM_RULES = """Every lesson must be a REFUSAL or a SUBTRACTION. Each one is one of exactly three forms:
+  (a) something to stop doing,
+  (b) something to stop explaining, proving or justifying,
+  (c) something to let go of.
+
+Never a new habit, practice, tool, system or routine to take up. The viewer already
+has too much. You are taking something away from them, not handing them another task.
+
+Titles must be an order or a flat statement, 4 to 8 words, no colon, no numbering.
+
+Six titles in the right register:
+  Stop Explaining Your Decisions to Spectators
+  Quit Auditioning for People Who Already Decided
+  Stop Rehearsing Arguments That Never Happen
+  Let Go of the Outcome You Were Promised
+  Stop Defending a Life You Already Chose
+  Drop the Grudge You Feed Every Morning
+
+Four titles that are wrong, and why:
+  "Use a Daily Thought Log" is wrong: it hands the viewer a new tool, and it is a
+    productivity instrument rather than something given up.
+  "Review and Reset Weekly" is wrong: it is a schedule, and it names nothing specific
+    to stop doing.
+  "Build a Resilience Framework" is wrong: it is jargon, and it asks the viewer to
+    construct a system instead of dropping something.
+  "Practice Gratitude Every Morning" is wrong: it is a routine to add, and it could
+    open any self-help video ever made."""
+
+# What keeps the prose from reading like advice written for nobody in particular.
+CONCRETE_DETAIL_RULE = """One detail in this lesson must be specific enough that it could not appear in
+generic advice. Not "your coworker" but the coworker who always copies you in and
+never addresses you. Not "you feel anxious" but what your hands are doing while you
+feel it. Name the object, the exact hour, the specific sentence someone said."""
