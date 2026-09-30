@@ -1,13 +1,14 @@
 """Image generation: two providers.
 
 pollinations.ai is primary. As of writing it no longer matches its old reputation as
-"free, no key, just rate-limited": anonymous requests now intermittently answer with
-HTTP 402 (payment required, an x402 crypto-payment scheme), seemingly tied to load or
-which parameters are set (the `seed` parameter alone was enough to trigger it in
-testing), not a documented, stable free quota. It still succeeds often enough to be
-worth trying first and free when it does. A POLLINATIONS_TOKEN in .env, if the
-account has one, is sent as a bearer token, which is a best-effort guess: the current
-docs could not be fetched to confirm the exact header.
+"free, no key, just rate-limited": anonymous requests intermittently answer with
+HTTP 402 (payment required, an x402 crypto-payment scheme), tied to load rather than
+a documented, stable free quota - a request can succeed at 1024x576 and 402 a moment
+later at the same size with nothing else changed. A registered POLLINATIONS_TOKEN
+(enter.pollinations.ai) measurably raises the success rate, though not to 100%, and
+must be sent as the query parameter ?token=..., not an Authorization header - tested
+against the live endpoint both ways; the header left every request 402ing exactly as
+if anonymous, the query parameter let most of them through.
 
 pexels is the fallback for stock photography, used only once pollinations has failed
 three attempts for a given prompt. PEXELS_API_KEY from .env; if that key is absent,
@@ -78,15 +79,16 @@ def synthesize_pollinations(prompt, out_path, seed, cfg):
 
     params = {"width": settings["width"], "height": settings["height"],
              "model": settings["model"], "nologo": "true", "seed": seed}
+    # A query parameter, not an Authorization header: confirmed by testing both against
+    # the live endpoint. Authorization: Bearer <token> left flux 402ing exactly as if
+    # anonymous; ?token=<token> is what actually gets through some of the time.
+    token = get_key("POLLINATIONS_TOKEN")
+    if token:
+        params["token"] = token
     url = POLLINATIONS_BASE.format(prompt=urllib.parse.quote(prompt)) + \
         "?" + urllib.parse.urlencode(params)
 
-    headers = {"User-Agent": USER_AGENT}
-    token = get_key("POLLINATIONS_TOKEN")
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-
-    req = urllib.request.Request(url, headers=headers)
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     try:
         with urllib.request.urlopen(req, timeout=120) as resp:
             data = resp.read()
