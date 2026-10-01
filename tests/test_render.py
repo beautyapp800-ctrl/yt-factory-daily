@@ -28,11 +28,21 @@ def check(cond, msg):
 RENDER_CFG = {
     "width": 1920, "height": 1080, "fps": 24, "crf": 21, "preset": "medium",
     "audio_bitrate_kbps": 192, "crossfade_s": 0.6, "upscale_factor": 4,
-    "zoom_max": 1.15, "exposures_per_image": 2, "preview_seconds": 60,
+    "zoom_min": 1.08, "zoom_max": 1.26, "preview_seconds": 60,
+    "double_exposure": False,
+    "pan_movements": [{"zoom": "in", "pan": "right"}, {"zoom": "out", "pan": "left"},
+                     {"zoom": "out", "pan": "right"}, {"zoom": "in", "pan": "left"}],
+    # Only read when double_exposure is on; kept here so the parked scheme stays tested.
+    "exposures_per_image": 2,
     "shuffle_min_block_images": 3, "shuffle_gap_shots": [2, 4],
     "movements": [{"zoom": "in", "focus": "left"}, {"zoom": "in", "focus": "right"},
                  {"zoom": "out", "focus": "left"}, {"zoom": "out", "focus": "right"}],
 }
+
+# The parked double-exposure scheme. Switched off in config.json because 44% of its
+# shots played a scene away from their own text; still tested, so turning the flag
+# back on cannot quietly be broken in the meantime.
+DOUBLE_CFG = dict(RENDER_CFG, double_exposure=True)
 
 
 class FakeFFmpeg:
@@ -153,12 +163,51 @@ def _shot_gaps(shots):
     return gaps
 
 
-def test_repeats_are_never_shown_back_to_back():
-    print("test_repeats_are_never_shown_back_to_back")
+def test_every_image_plays_once_in_its_own_scene():
+    print("test_every_image_plays_once_in_its_own_scene")
+    items = _fake_scene_items([1, 2, 1, 1, 2, 1, 1, 1], duration_s=33.0)
+    shots = stage.plan_shots(items, RENDER_CFG, seed=7)
+
+    images = [img["id"] for _, imgs in items for img in imgs]
+    check(len(shots) == len(images), f"one shot per image, no more ({len(shots)})")
+    check(sorted(s["image"]["id"] for s in shots) == sorted(images),
+          "every generated image is used exactly once")
+    strays = [s for s in shots if s["scene"]["idx"] != s["home_scene_idx"]]
+    check(not strays, f"no picture is borrowed by another scene ({len(strays)})")
+
+    lengths = {round(s["duration_s"], 3) for s in shots}
+    check(lengths == {33.0, 16.5},
+          f"a one-image scene holds its picture for the whole scene, a two-image "
+          f"scene splits it evenly ({sorted(lengths)})")
+
+
+def test_the_drift_reverses_on_every_shot():
+    print("test_the_drift_reverses_on_every_shot")
+    # A 22 second shot has to carry itself on the camera move alone, so neighbouring
+    # shots must not slide the same way: that is what reads as monotony.
+    items = _fake_scene_items([1] * 9)
+    pans = [s["movement"]["pan"] for s in stage.plan_shots(items, RENDER_CFG, seed=7)]
+    repeats = [k for k in range(1, len(pans)) if pans[k] == pans[k - 1]]
+    check(not repeats, f"the sideways drift reverses on every shot ({pans})")
+
+    moves = [(s["movement"]["zoom"], s["movement"]["pan"])
+             for s in stage.plan_shots(_fake_scene_items([1] * 8), RENDER_CFG, seed=7)]
+    check(len(set(moves)) == 4, f"all four push/pull/left/right moves get used ({set(moves)})")
+
+    # Deterministic, and not identical from one video to the next.
+    again = [s["movement"] for s in stage.plan_shots(items, RENDER_CFG, seed=7)]
+    other = [s["movement"] for s in stage.plan_shots(items, RENDER_CFG, seed=8)]
+    check(again == [s["movement"] for s in stage.plan_shots(items, RENDER_CFG, seed=7)],
+          "the same video id always plans the same camera")
+    check(again != other, "a different video id does not open with the same move")
+
+
+def test_parked_double_exposure_never_repeats_back_to_back():
+    print("test_parked_double_exposure_never_repeats_back_to_back")
     # The shape that broke the first cut of video 7: mostly one-image scenes, where
     # a scene's own two exposures are necessarily the same picture.
     items = _fake_scene_items([1, 2, 1, 1, 2, 1, 1, 1])
-    shots = stage.plan_shots(items, RENDER_CFG, seed=7)
+    shots = stage.plan_shots(items, DOUBLE_CFG, seed=7)
 
     check(len(shots) == 20, f"every image got both exposures ({len(shots)} shots)")
     adjacent = [k for k in range(1, len(shots))
@@ -176,7 +225,7 @@ def test_shot_lengths_still_fill_each_scene_exactly():
     # does not shuffle with it, so any drift here desyncs the rest of the video.
     items = _fake_scene_items([1, 2, 1, 1, 2], duration_s=33.0)
     items[2][0]["duration_s"] = 19.0        # an odd one out, to catch an averaged split
-    shots = stage.plan_shots(items, RENDER_CFG, seed=3)
+    shots = stage.plan_shots(items, DOUBLE_CFG, seed=3)
 
     per_scene = {}
     for shot in shots:
@@ -189,7 +238,7 @@ def test_shot_lengths_still_fill_each_scene_exactly():
 def test_a_picture_stays_near_its_own_text():
     print("test_a_picture_stays_near_its_own_text")
     items = _fake_scene_items([1, 2, 1, 1, 2, 1, 1, 1])
-    shots = stage.plan_shots(items, RENDER_CFG, seed=7)
+    shots = stage.plan_shots(items, DOUBLE_CFG, seed=7)
     distances = [abs(s["scene"]["idx"] - s["home_scene_idx"]) for s in shots]
     check(max(distances) <= 1,
           f"no picture plays more than one scene from the words it was drawn for "
@@ -201,7 +250,7 @@ def test_a_picture_stays_near_its_own_text():
 def test_two_showings_differ_in_framing_and_zoom():
     print("test_two_showings_differ_in_framing_and_zoom")
     items = _fake_scene_items([1, 2, 1, 1])
-    shots = stage.plan_shots(items, RENDER_CFG, seed=11)
+    shots = stage.plan_shots(items, DOUBLE_CFG, seed=11)
     by_image = {}
     for shot in shots:
         by_image.setdefault(shot["image"]["id"], []).append(shot["movement"])
@@ -215,9 +264,9 @@ def test_two_showings_differ_in_framing_and_zoom():
 def test_plan_is_deterministic_in_the_video_id():
     print("test_plan_is_deterministic_in_the_video_id")
     items = _fake_scene_items([1, 2, 1, 1, 2, 1])
-    first = stage.plan_shots(items, RENDER_CFG, seed=7)
-    again = stage.plan_shots(items, RENDER_CFG, seed=7)
-    other = stage.plan_shots(items, RENDER_CFG, seed=8)
+    first = stage.plan_shots(items, DOUBLE_CFG, seed=7)
+    again = stage.plan_shots(items, DOUBLE_CFG, seed=7)
+    other = stage.plan_shots(items, DOUBLE_CFG, seed=8)
 
     def signature(shots):
         return [(s["image"]["id"], s["movement"]["focus"], s["movement"]["zoom"])
@@ -240,8 +289,8 @@ def test_full_run_builds_expected_clips(tmp):
     finally:
         _restore(original)
 
-    # 2 scenes x 2 images x 2 exposures = 8 Ken Burns sub-shots.
-    check(len(fake.kenburns_calls) == 8, f"8 sub-shots rendered ({len(fake.kenburns_calls)})")
+    # 2 scenes x 2 images, shown once each = 4 shots.
+    check(len(fake.kenburns_calls) == 4, f"4 shots rendered ({len(fake.kenburns_calls)})")
     check(len(fake.concat_calls) == 2, "one concat per scene (2 scenes)")
     check(len(fake.xfade_calls) == 1, "one cross-fade pass across both scene clips")
     check(len(fake.xfade_calls[0]) == 2, "the cross-fade saw exactly the 2 scene clips")
@@ -268,9 +317,9 @@ def test_per_image_duration_split_evenly(tmp):
     finally:
         _restore(original)
 
-    # 40s / 2 images / 2 exposures = 10s per sub-shot.
+    # 40s scene, 2 images, one showing each = 20s per shot.
     sub_durations = {round(d, 3) for _, d, _ in fake.kenburns_calls}
-    check(sub_durations == {10.0}, f"each sub-shot got 10s ({sub_durations})")
+    check(sub_durations == {20.0}, f"each shot got 20s ({sub_durations})")
 
 
 def test_contrasting_pairs_rejects_a_lookalike_repeat():
@@ -308,8 +357,8 @@ def test_existing_scene_clip_is_skipped(tmp):
         _restore(original)
 
     # Only scene 2's two slots should have been built; scene 1 was reused untouched.
-    check(len(fake.kenburns_calls) == 2,
-          f"only the missing scene's shots were rendered ({len(fake.kenburns_calls)})")
+    check(len(fake.kenburns_calls) == 1,
+          f"only the missing scene's shot was rendered ({len(fake.kenburns_calls)})")
     check(len(fake.concat_calls) == 1, "only the missing scene got concatenated")
 
 
@@ -340,7 +389,7 @@ def test_resumed_run_renders_the_same_shots_it_would_have(tmp):
     finally:
         _restore(original)
 
-    check(resumed == whole[-len(resumed):] and len(resumed) == 4,
+    check(resumed == whole[-len(resumed):] and len(resumed) == 2,
           f"the resumed run rendered scenes 2-3 exactly as the first run did ({resumed})")
 
 
@@ -420,10 +469,10 @@ def test_static_fallback_keeps_timing_when_kenburns_fails(tmp):
     finally:
         _restore(original)
 
-    check(len(fake.static_calls) == 2,
-          f"both exposures fell back to a motionless shot ({len(fake.static_calls)})")
+    check(len(fake.static_calls) == 1,
+          f"the shot fell back to a motionless still ({len(fake.static_calls)})")
     durations = {round(d, 3) for _, d in fake.static_calls}
-    check(durations == {12.0},
+    check(durations == {24.0},
           f"the fallback holds each sub-shot's exact duration, so the voice track "
           f"stays in sync ({durations})")
 
@@ -431,7 +480,9 @@ def test_static_fallback_keeps_timing_when_kenburns_fails(tmp):
 if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
-        test_repeats_are_never_shown_back_to_back()
+        test_every_image_plays_once_in_its_own_scene()
+        test_the_drift_reverses_on_every_shot()
+        test_parked_double_exposure_never_repeats_back_to_back()
         test_shot_lengths_still_fill_each_scene_exactly()
         test_a_picture_stays_near_its_own_text()
         test_two_showings_differ_in_framing_and_zoom()

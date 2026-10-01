@@ -199,27 +199,47 @@ def kenburns_clip(image_path, out_path, duration_s, movement, cfg_render, cache_
     width, height = cfg_render["width"], cfg_render["height"]
     fps = cfg_render["fps"]
     factor = cfg_render["upscale_factor"]
+    zoom_min = cfg_render.get("zoom_min", 1.0)
     zoom_max = cfg_render["zoom_max"]
     frames = max(1, round(duration_s * fps))
 
     prescaled = prescale_image(image_path, cache_dir, width, height, factor)
 
+    progress = f"on/{frames}"
+    span = zoom_max - zoom_min
     if movement.get("zoom") == "out":
-        zoom_expr = f"{zoom_max}-({zoom_max}-1)*on/{frames}"
+        zoom_expr = f"{zoom_max}-{span}*{progress}"
     else:
-        zoom_expr = f"1+({zoom_max}-1)*on/{frames}"
-    # Zoom stays centred now; the framing comes from which slice was cut, not from
-    # nudging the zoom window, which is what could not work before.
-    x_expr = "(iw/2)-(iw/zoom/2)"
+        zoom_expr = f"{zoom_min}+{span}*{progress}"
+
+    # Horizontal drift. zoompan's crop window is iw/zoom wide, so the room it has to
+    # travel is (iw - iw/zoom) - the whole of which this uses, which is why the pan
+    # is worth having only when the zoom actually opens some room: at zoom 1.0 there
+    # is none at all, and the drift starts from nothing and widens with the push.
+    pan = movement.get("pan")
+    if pan == "right":
+        x_expr = f"(iw-iw/zoom)*{progress}"
+    elif pan == "left":
+        x_expr = f"(iw-iw/zoom)*(1-{progress})"
+    else:
+        x_expr = "(iw/2)-(iw/zoom/2)"
     y_expr = "(ih/2)-(ih/zoom/2)"
 
-    crop = framing_crop(movement.get("focus", "center"), width, height)
-    # Back up to the big working size after cropping, so zoompan still has plenty of
-    # source pixels to round to and the pan stays smooth.
     big_w, big_h = width * factor, height * factor
-    vf = (f"{crop},scale={big_w}:{big_h}:flags=lanczos,"
-         f"zoompan=z='{zoom_expr}':x='{x_expr}':y='{y_expr}':d={frames}:"
-         f"s={width}x{height}:fps={fps},setsar=1")
+    chain = []
+    focus = movement.get("focus")
+    if focus:
+        # Double-exposure framing: cut a real slice of the picture and blow it back
+        # up to the working size, so zoompan still has plenty of source pixels to
+        # round to and the move stays smooth. Only used when an image is shown more
+        # than once and the second showing has to look like a different shot;
+        # otherwise the whole frame is the shot.
+        chain.append(framing_crop(focus, width, height))
+        chain.append(f"scale={big_w}:{big_h}:flags=lanczos")
+    chain.append(f"zoompan=z='{zoom_expr}':x='{x_expr}':y='{y_expr}':d={frames}:"
+                 f"s={width}x{height}:fps={fps}")
+    chain.append("setsar=1")
+    vf = ",".join(chain)
 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)

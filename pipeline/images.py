@@ -1,10 +1,15 @@
 """Stage 4: illustrate the script.
 
-One still image per scene is too long on screen: video 7 averages 33s a scene, and
-channels in this niche change the image every 8-15 seconds. So each scene gets
-max(1, round(duration_s / images_per_seconds)) images instead of one, all sharing
+A scene can be long - video 7 averages 33s - so each scene gets
+max(1, round(duration_s / images_per_seconds)) images rather than one, all sharing
 the scene's own image_prompt but rendered with a different seed each, so the same
 description still produces visibly different frames.
+
+images_per_seconds is the only thing that sets the Cloudflare bill, and since the
+render stage shows each image once, it is also the length of a shot: at 22 it means
+63 images and a new picture every 22 seconds for a 23 minute video. Shortening it
+buys a faster cut at a proportionally higher Neuron cost - 96 Neurons per image
+against 10,000 a day.
 
 Fallback order per image: Cloudflare Workers AI, then pollinations.ai, then - only
 if both fail - duplicate whichever image most recently succeeded anywhere in this

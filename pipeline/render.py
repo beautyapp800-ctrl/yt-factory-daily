@@ -4,24 +4,22 @@ Scope, deliberately minimal: no parallax, no subtitles, no music, no intro/outro
 that is stage 6. The goal here is a watchable MP4 that proves the pipeline reaches
 the end, not a finished product.
 
-Double exposure (required, see README): each generated image is shown twice, with a
-different framing and a different zoom direction each time. This is not a visual
-flourish; it is how a 30 minute video's image budget fits Cloudflare's free daily
-Neuron allocation at all (see README's "Обов'язкова вимога" section) - half as many
-generated images, the same number of visible cuts.
+One showing per image, inside its own scene (config.render.double_exposure=false).
+Every picture plays under the words it was drawn for; nothing is borrowed from a
+neighbouring scene and no picture is ever repeated.
 
-Spreading the repeats: the two showings used to sit back to back, which read as the
-same picture held for half a minute. They are now planned across a block of
-neighbouring scenes, so the order runs A B C A D B - every repeat has 2 to 4 other
-shots in front of it. The plan is seeded from the video id, so it is reproducible and
-a resumed run continues the same video rather than inventing a new one.
+This replaced a double-exposure scheme, where each image was shown twice and the two
+showings were spread across a block of neighbouring scenes to keep them apart. That
+doubled the rate of visible cuts for free, but 44% of shots ended up playing a scene
+away from their own text, which is too high a price for a channel whose pictures are
+supposed to illustrate the script. The code is still here behind the flag.
 
-The cost, stated plainly: a scene carries one image per 22 seconds of narration, so
-most scenes have one or two. There is no way to put other shots between an image's
-two showings using only that scene's own images - a one-image scene has nothing else
-to show. Spreading them therefore lets a picture drift up to a scene away from the
-words it was drawn for. plan_shots keeps blocks as short as the gap allows and logs
-how far pictures actually moved.
+What it costs, stated plainly: an image is generated for every 22 seconds of
+narration, so a shot now lasts around 22 seconds instead of 11. The camera move
+therefore has to carry a long take - a wider zoom range plus a sideways drift, see
+core.render.kenburns_clip. The image budget is unchanged either way: the images stage
+plans round(duration / images_per_seconds) pictures per scene and never knew how many
+times each would be shown.
 
 Resumable per scene: output/<id>/clips/scene_XXX.mp4 is skipped if it already
 exists, so a failure partway through does not lose earlier scenes and a re-run
@@ -45,6 +43,17 @@ MAX_BYTES_PER_SECOND = 3_000_000    # ~24 Mbps ceiling - catches a runaway encod
 
 DEFAULT_MIN_BLOCK_IMAGES = 4
 DEFAULT_GAP_SHOTS = [2, 4]          # other shots between an image's two showings
+
+# Camera moves for the single-showing scheme: a push or a pull that drifts sideways
+# as it goes. Cycled in order, and the order matters - the drift reverses on every
+# single step, so no two shots in a row slide the same way, while the four entries
+# still cover both zoom directions crossed with both drifts.
+DEFAULT_PAN_MOVEMENTS = [
+    {"zoom": "in", "pan": "right"},
+    {"zoom": "out", "pan": "left"},
+    {"zoom": "out", "pan": "right"},
+    {"zoom": "in", "pan": "left"},
+]
 
 
 def _blocks(scene_items, min_images):
@@ -134,8 +143,53 @@ def _unstick(order):
 
 
 def plan_shots(scene_items, cfg_render, seed):
-    """Decide, for the whole video, which image fills every shot slot, how long it is
-    held and which way the camera moves. Returns shot dicts in playback order.
+    """Decide, for the whole video, which image fills every shot, how long it is held
+    and which way the camera moves. Returns shot dicts in playback order.
+
+    Two schemes, picked by config.render.double_exposure:
+
+    False (the default): one showing per image, held for its share of its own scene.
+    Every picture plays under the words it was drawn for, nothing is borrowed from a
+    neighbouring scene, and a repeat cannot happen because there are none. A shot
+    then lasts around 22 seconds, so the camera move has to carry it - see
+    config.render.pan_movements and core.render.kenburns_clip.
+
+    True: each image is shown twice, spread across neighbouring scenes. Kept because
+    it doubles the rate of visible cuts at no extra generation cost, and may be worth
+    revisiting; switched off because the price is too high - 44% of shots played a
+    scene away from their own text, which undoes the work of making the pictures
+    match the script in the first place.
+    """
+    if cfg_render.get("double_exposure", False):
+        return _plan_double_exposure(scene_items, cfg_render, seed)
+    return _plan_single(scene_items, cfg_render, seed)
+
+
+def _plan_single(scene_items, cfg_render, seed):
+    """One showing per image, always inside its own scene, in scene order.
+
+    Camera moves cycle through config.render.pan_movements, offset by the video id so
+    consecutive videos do not all open with the same move. Deterministic either way:
+    the same video always plans the same camera.
+    """
+    movements = cfg_render.get("pan_movements") or DEFAULT_PAN_MOVEMENTS
+    shots = []
+    for scene, images_rows in scene_items:
+        per_shot = (scene["duration_s"] or 0) / len(images_rows)
+        for image_row in images_rows:
+            shots.append({
+                "scene": scene,
+                "image": image_row,
+                "home_scene_idx": scene["idx"],
+                "movement": movements[(len(shots) + seed) % len(movements)],
+                "duration_s": per_shot,
+                "exposure": 0,
+            })
+    return shots
+
+
+def _plan_double_exposure(scene_items, cfg_render, seed):
+    """Two showings per image, spread 2-4 shots apart across a block of scenes.
 
     Slot lengths come from the scene the slot belongs to: a scene keeps exactly its
     own number of slots, each an equal share of its own narration. Changing which
@@ -144,6 +198,8 @@ def plan_shots(scene_items, cfg_render, seed):
 
     Deterministic in `seed` (the video id): the same video always plans the same way,
     so a resumed run continues the plan it is resuming instead of mixing two.
+
+    Off by default - see plan_shots for why it is kept rather than deleted.
     """
     exposures = cfg_render["exposures_per_image"]
     min_images = cfg_render.get("shuffle_min_block_images", DEFAULT_MIN_BLOCK_IMAGES)
@@ -240,10 +296,16 @@ def run(video_id, cfg):
         by_scene.setdefault(shot["scene"]["idx"], []).append(shot)
 
     moved = [abs(s["scene"]["idx"] - s["home_scene_idx"]) for s in shots]
-    log.info("%d shots planned over %d scenes: %.0f%% play inside their own scene, "
-             "the rest at most %d scene(s) away",
-             len(shots), len(scene_items),
-             100 * sum(1 for d in moved if d == 0) / len(moved), max(moved))
+    lengths = [s["duration_s"] for s in shots]
+    if max(moved) == 0:
+        log.info("%d shots planned over %d scenes, every picture inside its own "
+                 "scene, %.0f-%.0fs each", len(shots), len(scene_items),
+                 min(lengths), max(lengths))
+    else:
+        log.info("%d shots planned over %d scenes: %.0f%% play inside their own "
+                 "scene, the rest at most %d scene(s) away",
+                 len(shots), len(scene_items),
+                 100 * sum(1 for d in moved if d == 0) / len(moved), max(moved))
 
     scene_clip_paths = []
     built, skipped = 0, 0
