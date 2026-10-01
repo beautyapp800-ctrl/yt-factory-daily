@@ -25,6 +25,7 @@ smoothest measured and, because the upscale is a one-off per image rather than
 carried through every frame, by far the fastest.
 """
 import subprocess
+import time
 from pathlib import Path
 
 from core.logger import get_logger
@@ -55,9 +56,22 @@ def require_ffmpeg():
     _ffmpeg_checked = True
 
 
+def _frames_reported(stderr):
+    """The frame count from ffmpeg's own -stats line, or None if it printed none.
+
+    Worth having permanently: if a sub-shot ever renders far slower than its
+    neighbours, this says whether ffmpeg actually processed more frames than the
+    clip needs (a d/duration miscalculation generating frames that -t then throws
+    away) or exactly the right number (so the time went somewhere else).
+    """
+    import re
+    matches = re.findall(r"frame=\s*(\d+)", stderr or "")
+    return int(matches[-1]) if matches else None
+
+
 def _run_ffmpeg(args, error_context, timeout=None):
     require_ffmpeg()
-    result = subprocess.run(["ffmpeg", "-y", "-loglevel", "error"] + args,
+    result = subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-stats"] + args,
                             capture_output=True, text=True, timeout=timeout)
     if result.returncode != 0:
         raise RenderError(f"{error_context}: {result.stderr.strip()[-500:]}")
@@ -129,12 +143,22 @@ def kenburns_clip(image_path, out_path, duration_s, movement, cfg_render, cache_
 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    _run_ffmpeg(
+    started = time.time()
+    result = _run_ffmpeg(
         ["-loop", "1", "-i", str(prescaled), "-vf", vf, "-t", f"{duration_s:.3f}",
          "-r", str(fps), "-pix_fmt", "yuv420p", "-an",
          "-c:v", "libx264", "-crf", str(cfg_render["crf"]), "-preset", cfg_render["preset"],
          str(out_path)],
         f"ffmpeg could not render a Ken Burns clip from {image_path}")
+
+    elapsed = time.time() - started
+    reported = _frames_reported(result.stderr)
+    log.info("sub-shot %s: %.2fs wanted, d=%d, ffmpeg wrote %s frames, took %.1fs",
+             out_path.name, duration_s, frames,
+             reported if reported is not None else "?", elapsed)
+    if reported is not None and reported > frames * 1.5:
+        log.warning("sub-shot %s processed %d frames for a %d frame clip - ffmpeg is "
+                    "generating frames that -t then discards", out_path.name, reported, frames)
     return out_path
 
 
