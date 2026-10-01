@@ -1,0 +1,4 @@
+piper-tts
+edge-tts
+Pillow
+pytesseract

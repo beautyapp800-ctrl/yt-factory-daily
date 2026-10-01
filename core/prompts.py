@@ -21,15 +21,81 @@ OUTLINE_SYSTEM = f"""{STYLE_RULES}
 You are planning a video. Reply with valid JSON only."""
 
 IMAGE_SYSTEM = """You write prompts for an image generator that illustrates a Stoicism video.
+The generator renders any text, label or logo you name as garbled pseudo-text, because
+the model you are writing for barely follows negative instructions - "no text" in the
+prompt does not stop it from drawing a label once you have described a box. The only
+reliable fix is to never put a text-bearing object in the description at all.
 
 Rules for every prompt:
 - English, 15 to 30 words, describing one concrete scene, object or place.
 - No close-up faces and no real historical people. Use silhouettes, hands, backs turned, landscapes, objects, architecture, weather.
-- No text, no letters, no signage in the image.
+- Never describe any of these, because each one invites rendered text or a recognisable
+  brand: a phone, laptop, tablet, monitor or TV screen; a box, package, bottle, can,
+  label or sign; a book, newspaper, document or poster; printed clothing or a logo on
+  an object.
+- Instead reach for things that carry no text by nature: landscapes, weather, light
+  through a window, architecture, stone, wood grain, fabric, water, empty rooms,
+  stairs, doorways, paths, plain furniture, unmarked dishes, plants, empty hands.
 - Describe what is visible, not what it means. No abstractions like "the concept of time".
 - Do not add a style description; the pipeline appends one.
 
 Reply with valid JSON only."""
+
+# Concrete nouns that reliably invite rendered pseudo-text or a recognisable brand once
+# an image model draws them. Checked against every image_prompt before it is sent to a
+# provider; a hit means the prompt gets rewritten rather than used as-is. "tv" is
+# matched as a whole word like the rest, via the word-boundary regex in
+# find_banned_image_words, not a special case.
+IMAGE_BANNED_WORDS = [
+    "laptop", "notebook computer", "screen", "monitor", "television", "tv",
+    "tablet", "phone", "smartphone", "ipad", "iphone",
+    "box", "package", "packaging", "parcel", "bottle", "can", "jar", "label", "sign",
+    "signage", "billboard", "placard", "tag", "price tag", "name tag", "sticker",
+    "book", "newspaper", "magazine", "document", "paper", "letter", "poster", "flyer",
+    "logo", "brand", "branded", "print", "printed",
+]
+
+# A prompt that spells out a literal amount or line of text ("a price tag reading
+# $1,299", "a sign that says OPEN") is telling the model exactly which characters to
+# render, which IMAGE_BANNED_WORDS alone does not catch when neither "price tag" nor
+# a words-to-render verb happens to be literally present. Caught live: scene 12 of
+# video 7 read "A close-up of a price tag reading $1,299..." - "reading" plus a
+# currency figure, no banned noun in sight.
+_TEXT_CONTENT_PATTERN = __import__("re").compile(
+    r"\$[\d,]+|reading [\"']?\w|that says|that read[s]?|written in|"
+    r"the words? [\"']|says [\"']")
+
+
+def find_banned_image_words(text):
+    """Which IMAGE_BANNED_WORDS (if any) appear in this prompt, as whole words/phrases,
+    plus a synthetic "spells out text/numbers" hit when the prompt itself dictates
+    literal characters to render (a price, a percentage, "reading ...", "that says ...")."""
+    import re
+    low = (text or "").lower()
+    hits = [w for w in IMAGE_BANNED_WORDS if re.search(rf"\b{re.escape(w)}\b", low)]
+    if _TEXT_CONTENT_PATTERN.search(low):
+        hits.append("spells out literal text/numbers")
+    return hits
+
+
+def image_prompt_fix_request(original_prompt, banned_hits):
+    """Ask the model to redraw the same moment without the flagged nouns."""
+    return f"""This image prompt describes something that will render as garbled text or a
+recognisable brand once generated:
+
+"{original_prompt}"
+
+The problem: it names {", ".join(banned_hits)}, which an image model cannot draw
+without inventing fake lettering or logos on it.
+
+Rewrite it as a different concrete image for the same moment and mood, 15 to 30 words,
+English, that uses none of: phones, laptops, tablets, screens, boxes, packaging,
+bottles, cans, labels, signs, books, newspapers, documents, posters, logos or printed
+clothing. Reach for landscapes, light, architecture, stone, wood, fabric, water, empty
+rooms, stairs, doorways, paths, plain furniture, unmarked objects, plants or empty
+hands instead. No style description; that is appended separately.
+
+Reply with the rewritten prompt only, no quotes, no JSON, no explanation."""
 
 # Distinct places for the opening situation of each lesson, so ten lessons do not
 # all open in a kitchen in the morning. One is assigned per lesson.
