@@ -64,17 +64,40 @@
     "upscale_factor": 3,
     "zoom_max": 1.15,
     "exposures_per_image": 2,
+    "shuffle_min_block_images": 3,
+    "shuffle_gap_shots": [
+      2,
+      4
+    ],
     "preview_seconds": 60,
     "subshot_timeout_s": 300,
     "subshot_timeout_multiplier": 2,
     "subshot_attempts": 3,
     "movements": [
-      {"zoom": "in", "focus": "left"},
-      {"zoom": "in", "focus": "right"},
-      {"zoom": "out", "focus": "left"},
-      {"zoom": "out", "focus": "right"},
-      {"zoom": "in", "focus": "center"},
-      {"zoom": "out", "focus": "center"}
+      {
+        "zoom": "in",
+        "focus": "left"
+      },
+      {
+        "zoom": "in",
+        "focus": "right"
+      },
+      {
+        "zoom": "out",
+        "focus": "left"
+      },
+      {
+        "zoom": "out",
+        "focus": "right"
+      },
+      {
+        "zoom": "in",
+        "focus": "center"
+      },
+      {
+        "zoom": "out",
+        "focus": "center"
+      }
     ]
   }
 }

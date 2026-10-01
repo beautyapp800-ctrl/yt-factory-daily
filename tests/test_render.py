@@ -29,6 +29,7 @@ RENDER_CFG = {
     "width": 1920, "height": 1080, "fps": 24, "crf": 21, "preset": "medium",
     "audio_bitrate_kbps": 192, "crossfade_s": 0.6, "upscale_factor": 4,
     "zoom_max": 1.15, "exposures_per_image": 2, "preview_seconds": 60,
+    "shuffle_min_block_images": 3, "shuffle_gap_shots": [2, 4],
     "movements": [{"zoom": "in", "focus": "left"}, {"zoom": "in", "focus": "right"},
                  {"zoom": "out", "focus": "left"}, {"zoom": "out", "focus": "right"}],
 }
@@ -133,13 +134,99 @@ def _setup_video(tmp, name, scene_durations, images_per_scene=1):
     return vid
 
 
-def test_movement_cycles_globally():
-    print("test_movement_cycles_globally")
-    movements = RENDER_CFG["movements"]
-    seq = [stage._movement_for(i, movements) for i in range(6)]
-    check(seq[0] == movements[0] and seq[3] == movements[3],
-          "the cycle follows the configured order")
-    check(seq[4] == movements[0], "the cycle wraps around after the list length")
+def _fake_scene_items(images_per_scene, duration_s=30.0):
+    """Scene rows as plan_shots sees them: (scene, images). Plain dicts are enough -
+    plan_shots only reads idx, duration_s and hands the image rows straight through."""
+    return [({"idx": i, "duration_s": duration_s},
+             [{"id": i * 100 + j, "path": f"scene_{i:03d}_{j:02d}.jpg"} for j in range(n)])
+            for i, n in enumerate(images_per_scene, 1)]
+
+
+def _shot_gaps(shots):
+    """How many other shots sit between each image's two showings."""
+    seen, gaps = {}, []
+    for k, shot in enumerate(shots):
+        image_id = shot["image"]["id"]
+        if image_id in seen:
+            gaps.append(k - seen[image_id] - 1)
+        seen[image_id] = k
+    return gaps
+
+
+def test_repeats_are_never_shown_back_to_back():
+    print("test_repeats_are_never_shown_back_to_back")
+    # The shape that broke the first cut of video 7: mostly one-image scenes, where
+    # a scene's own two exposures are necessarily the same picture.
+    items = _fake_scene_items([1, 2, 1, 1, 2, 1, 1, 1])
+    shots = stage.plan_shots(items, RENDER_CFG, seed=7)
+
+    check(len(shots) == 20, f"every image got both exposures ({len(shots)} shots)")
+    adjacent = [k for k in range(1, len(shots))
+                if shots[k]["image"]["id"] == shots[k - 1]["image"]["id"]]
+    check(not adjacent, f"no image is ever shown twice in a row ({adjacent})")
+    gaps = _shot_gaps(shots)
+    check(min(gaps) >= 1, f"every repeat has at least one other shot before it ({min(gaps)})")
+    spread = sum(1 for g in gaps if 2 <= g <= 4) / len(gaps)
+    check(spread >= 0.8, f"{spread:.0%} of repeats land in the asked-for 2-4 shot gap")
+
+
+def test_shot_lengths_still_fill_each_scene_exactly():
+    print("test_shot_lengths_still_fill_each_scene_exactly")
+    # The one thing shuffling must never do: move a scene boundary. The voice track
+    # does not shuffle with it, so any drift here desyncs the rest of the video.
+    items = _fake_scene_items([1, 2, 1, 1, 2], duration_s=33.0)
+    items[2][0]["duration_s"] = 19.0        # an odd one out, to catch an averaged split
+    shots = stage.plan_shots(items, RENDER_CFG, seed=3)
+
+    per_scene = {}
+    for shot in shots:
+        idx = shot["scene"]["idx"]
+        per_scene[idx] = per_scene.get(idx, 0) + shot["duration_s"]
+    worst = max(abs(per_scene[scene["idx"]] - scene["duration_s"]) for scene, _ in items)
+    check(worst < 1e-6, f"each scene's shots still add up to its own duration ({worst:.2e}s)")
+
+
+def test_a_picture_stays_near_its_own_text():
+    print("test_a_picture_stays_near_its_own_text")
+    items = _fake_scene_items([1, 2, 1, 1, 2, 1, 1, 1])
+    shots = stage.plan_shots(items, RENDER_CFG, seed=7)
+    distances = [abs(s["scene"]["idx"] - s["home_scene_idx"]) for s in shots]
+    check(max(distances) <= 1,
+          f"no picture plays more than one scene from the words it was drawn for "
+          f"({max(distances)})")
+    at_home = sum(1 for d in distances if d == 0) / len(distances)
+    check(at_home >= 0.4, f"{at_home:.0%} of shots still play inside their own scene")
+
+
+def test_two_showings_differ_in_framing_and_zoom():
+    print("test_two_showings_differ_in_framing_and_zoom")
+    items = _fake_scene_items([1, 2, 1, 1])
+    shots = stage.plan_shots(items, RENDER_CFG, seed=11)
+    by_image = {}
+    for shot in shots:
+        by_image.setdefault(shot["image"]["id"], []).append(shot["movement"])
+
+    same_focus = [i for i, ms in by_image.items() if ms[0]["focus"] == ms[1]["focus"]]
+    same_zoom = [i for i, ms in by_image.items() if ms[0]["zoom"] == ms[1]["zoom"]]
+    check(not same_focus, f"the two showings never share a framing ({same_focus})")
+    check(not same_zoom, f"the two showings never share a zoom direction ({same_zoom})")
+
+
+def test_plan_is_deterministic_in_the_video_id():
+    print("test_plan_is_deterministic_in_the_video_id")
+    items = _fake_scene_items([1, 2, 1, 1, 2, 1])
+    first = stage.plan_shots(items, RENDER_CFG, seed=7)
+    again = stage.plan_shots(items, RENDER_CFG, seed=7)
+    other = stage.plan_shots(items, RENDER_CFG, seed=8)
+
+    def signature(shots):
+        return [(s["image"]["id"], s["movement"]["focus"], s["movement"]["zoom"])
+                for s in shots]
+
+    check(signature(first) == signature(again),
+          "the same video id always plans the same video, so a resumed run matches")
+    check(signature(first) != signature(other),
+          "a different video id plans a different order")
 
 
 def test_full_run_builds_expected_clips(tmp):
@@ -186,22 +273,21 @@ def test_per_image_duration_split_evenly(tmp):
     check(sub_durations == {10.0}, f"each sub-shot got 10s ({sub_durations})")
 
 
-def test_movements_alternate_within_and_across_images(tmp):
-    print("test_movements_alternate_within_and_across_images")
-    vid = _setup_video(tmp, "altern", [24], images_per_scene=2)
-    fake = FakeFFmpeg()
-    fake.durations[str(config.output_dir(vid) / "voice.mp3")] = 24
-    original = _install_fake(fake)
-    try:
-        stage.run(vid, {"render": RENDER_CFG})
-    finally:
-        _restore(original)
+def test_contrasting_pairs_rejects_a_lookalike_repeat():
+    print("test_contrasting_pairs_rejects_a_lookalike_repeat")
+    pairs = render.contrasting_pairs(RENDER_CFG["movements"])
+    check(pairs, "the configured movements yield usable pairs")
+    check(all(a["focus"] != b["focus"] and a["zoom"] != b["zoom"] for a, b in pairs),
+          "every pair differs in both framing and zoom direction")
 
-    used = [m for _, _, m in fake.kenburns_calls]
-    check(used[0]["focus"] == "left" and used[1]["focus"] == "right",
-          "the two exposures of one image use different focus points")
-    check(used == RENDER_CFG["movements"][:4],
-          f"movements cycle through the configured list in order ({used})")
+    # A list that cannot satisfy the strict rule must degrade, not crash: a repeat
+    # still has to be rendered somehow.
+    weak = render.contrasting_pairs([{"zoom": "in", "focus": "left"},
+                                     {"zoom": "in", "focus": "right"}])
+    check(weak and all(a["focus"] != b["focus"] for a, b in weak),
+          "with only one zoom direction configured it falls back to differing framings")
+    single = render.contrasting_pairs([{"zoom": "in", "focus": "left"}])
+    check(len(single) == 1, "a single configured movement still yields a usable pair")
 
 
 def test_existing_scene_clip_is_skipped(tmp):
@@ -221,36 +307,41 @@ def test_existing_scene_clip_is_skipped(tmp):
     finally:
         _restore(original)
 
-    rendered_scenes = {Path(p).stem for calls in [fake.concat_calls] for group in calls
-                       for p in group}
-    # Only scene 2's sub-shots should have been built; scene 1 was reused untouched.
-    check(all("scene_002" in str(c[0]) for c in fake.kenburns_calls) or not fake.kenburns_calls,
-          "kenburns_clip was only called for the scene without an existing clip")
+    # Only scene 2's two slots should have been built; scene 1 was reused untouched.
+    check(len(fake.kenburns_calls) == 2,
+          f"only the missing scene's shots were rendered ({len(fake.kenburns_calls)})")
     check(len(fake.concat_calls) == 1, "only the missing scene got concatenated")
 
 
-def test_movement_cycle_accounts_for_skipped_scenes(tmp):
-    print("test_movement_cycle_accounts_for_skipped_scenes")
-    vid = _setup_video(tmp, "cycleresume", [20, 20, 20], images_per_scene=1)
+def test_resumed_run_renders_the_same_shots_it_would_have(tmp):
+    print("test_resumed_run_renders_the_same_shots_it_would_have")
+    # Shots are planned for the whole video up front from the video id, so a run that
+    # reuses earlier scene clips must still render the later scenes exactly as the
+    # interrupted run would have. Rendered once whole, once resumed, compared.
+    vid = _setup_video(tmp, "resumeplan", [20, 20, 20], images_per_scene=1)
     out = config.output_dir(vid)
     clips_dir = out / "clips"
-    clips_dir.mkdir(parents=True, exist_ok=True)
-    (clips_dir / "scene_001.mp4").write_bytes(b"\x00" * 1000)
 
     fake = FakeFFmpeg()
-    fake.durations[str(clips_dir / "scene_001.mp4")] = 20.0
     fake.durations[str(out / "voice.mp3")] = 60 - 1.2
     original = _install_fake(fake)
     try:
         stage.run(vid, {"render": RENDER_CFG})
+        whole = [(Path(img).name, dict(m)) for img, _, m in fake.kenburns_calls]
+
+        # Throw away everything after scene 1 and run again.
+        for leftover in list(clips_dir.glob("scene_002.mp4")) + \
+                        list(clips_dir.glob("scene_003.mp4")) + \
+                        list((clips_dir / "_parts").glob("scene_00[23]_*.mp4")):
+            leftover.unlink()
+        fake.kenburns_calls.clear()
+        stage.run(vid, {"render": RENDER_CFG})
+        resumed = [(Path(img).name, dict(m)) for img, _, m in fake.kenburns_calls]
     finally:
         _restore(original)
 
-    # Scene 1 (1 image x 2 exposures) is skipped but must still advance the global
-    # counter, so scene 2's first exposure continues the cycle at index 2, not 0.
-    first_used = fake.kenburns_calls[0][2]
-    check(first_used == RENDER_CFG["movements"][2],
-          f"the cycle picks up where a skipped scene left off ({first_used})")
+    check(resumed == whole[-len(resumed):] and len(resumed) == 4,
+          f"the resumed run rendered scenes 2-3 exactly as the first run did ({resumed})")
 
 
 def test_black_first_frame_raises(tmp):
@@ -340,12 +431,16 @@ def test_static_fallback_keeps_timing_when_kenburns_fails(tmp):
 if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
-        test_movement_cycles_globally()
+        test_repeats_are_never_shown_back_to_back()
+        test_shot_lengths_still_fill_each_scene_exactly()
+        test_a_picture_stays_near_its_own_text()
+        test_two_showings_differ_in_framing_and_zoom()
+        test_plan_is_deterministic_in_the_video_id()
         test_full_run_builds_expected_clips(tmp)
         test_per_image_duration_split_evenly(tmp)
-        test_movements_alternate_within_and_across_images(tmp)
+        test_contrasting_pairs_rejects_a_lookalike_repeat()
         test_existing_scene_clip_is_skipped(tmp)
-        test_movement_cycle_accounts_for_skipped_scenes(tmp)
+        test_resumed_run_renders_the_same_shots_it_would_have(tmp)
         test_black_first_frame_raises(tmp)
         test_duration_mismatch_raises(tmp)
         test_no_scenes_raises(tmp)

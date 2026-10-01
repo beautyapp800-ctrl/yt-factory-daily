@@ -34,7 +34,28 @@ log = get_logger("render")
 
 USER_AGENT = "yt-factory/1.0"   # unused by ffmpeg itself; kept for log message parity
 
-FOCUS_X = {"left": 0.33, "right": 0.67, "center": 0.5}
+# Where each framing takes its slice from, as a fraction of the source width: the
+# region's width, and the left edge of that region. "left" and "right" overlap in the
+# middle by 30%, so the two exposures of one image share some content but are plainly
+# different shots.
+#
+# This replaces an earlier attempt to get the same effect by biasing zoompan's x
+# expression toward a third of the frame. That could not work: at zoom_max 1.15 the
+# crop window is 87% of the image, so it can only slide 6.5% either side of centre
+# before hitting the edge, where ffmpeg clamps it. Every "left third" shot was in
+# practice a plain centred zoom, which is why both exposures of an image looked
+# identical. Cutting the region out of the image itself has no such ceiling.
+# (fraction of the axis the region covers, fraction where the region starts)
+FRAMINGS_HORIZONTAL = {
+    "left":   (0.65, 0.00),
+    "right":  (0.65, 0.35),
+    "center": (0.80, 0.10),
+}
+FRAMINGS_VERTICAL = {
+    "top":    (0.65, 0.00),
+    "bottom": (0.65, 0.35),
+    "middle": (0.80, 0.10),
+}
 
 
 class RenderError(Exception):
@@ -126,20 +147,60 @@ def prescale_image(image_path, cache_dir, width, height, upscale_factor):
     return cache_path
 
 
-def kenburns_clip(image_path, out_path, duration_s, movement, cfg_render, cache_dir):
-    """One Ken Burns sub-shot from a still image: a slow zoom in or out, biased
-    toward the left/right/center third of the frame. Video only, no audio.
+def framing_crop(focus, width, height):
+    """The ffmpeg crop that cuts one framing's region out of the pre-scaled still.
 
-    Reads from the cached upscaled still (prescale_image), and zoompan outputs
-    straight at the final width x height - no further downscale filter needed, which
-    is both simpler and the whole point of the fix above.
+    The region is a real slice of the picture - the left 65% of its width, the right
+    65%, the top or bottom 65% of its height - re-scaled to fill the frame. Two
+    exposures of one image therefore show genuinely different parts of it, which a
+    zoompan offset could never achieve (see the FRAMINGS comment).
+    """
+    if focus in FRAMINGS_VERTICAL:
+        span, start = FRAMINGS_VERTICAL[focus]
+        return f"crop=iw:ih*{span}:0:ih*{start}"
+    span, start = FRAMINGS_HORIZONTAL.get(focus, FRAMINGS_HORIZONTAL["center"])
+    return f"crop=iw*{span}:ih:iw*{start}:0"
+
+
+def contrasting_pairs(movements):
+    """Pairs of configured movements that differ in BOTH framing and zoom direction.
+
+    An image is shown twice (see pipeline/render.py); the pair picked for it decides
+    how different the two showings look. Differing in framing alone leaves two shots
+    that drift the same way across different halves of the picture; differing in zoom
+    alone leaves the identical crop running backwards. Both differing is what makes
+    the repeat read as another shot rather than the same one again.
+
+    Falls back to a weaker rule rather than failing if the configured list cannot
+    supply a fully contrasting pair: the repeat still has to come from somewhere.
+    """
+    def pairs_where(ok):
+        return [(a, b) for a in movements for b in movements if ok(a, b)]
+
+    both = pairs_where(lambda a, b: a.get("focus") != b.get("focus")
+                       and a.get("zoom") != b.get("zoom"))
+    if both:
+        return both
+    framing = pairs_where(lambda a, b: a.get("focus") != b.get("focus"))
+    if framing:
+        return framing
+    distinct = pairs_where(lambda a, b: a != b)
+    return distinct or [(movements[0], movements[0])]
+
+
+def kenburns_clip(image_path, out_path, duration_s, movement, cfg_render, cache_dir):
+    """One Ken Burns sub-shot: a slice of the image, re-framed to fill the screen,
+    with a slow zoom in or out across it. Video only, no audio.
+
+    Reads from the cached upscaled still (prescale_image), crops the framing's region,
+    scales that back up to the delivery size, then zoompan moves within it and outputs
+    straight at the final width x height.
     """
     width, height = cfg_render["width"], cfg_render["height"]
     fps = cfg_render["fps"]
     factor = cfg_render["upscale_factor"]
     zoom_max = cfg_render["zoom_max"]
     frames = max(1, round(duration_s * fps))
-    fx = FOCUS_X.get(movement.get("focus", "center"), 0.5)
 
     prescaled = prescale_image(image_path, cache_dir, width, height, factor)
 
@@ -147,10 +208,17 @@ def kenburns_clip(image_path, out_path, duration_s, movement, cfg_render, cache_
         zoom_expr = f"{zoom_max}-({zoom_max}-1)*on/{frames}"
     else:
         zoom_expr = f"1+({zoom_max}-1)*on/{frames}"
-    x_expr = f"(iw*{fx})-(iw/zoom/2)"
+    # Zoom stays centred now; the framing comes from which slice was cut, not from
+    # nudging the zoom window, which is what could not work before.
+    x_expr = "(iw/2)-(iw/zoom/2)"
     y_expr = "(ih/2)-(ih/zoom/2)"
 
-    vf = (f"zoompan=z='{zoom_expr}':x='{x_expr}':y='{y_expr}':d={frames}:"
+    crop = framing_crop(movement.get("focus", "center"), width, height)
+    # Back up to the big working size after cropping, so zoompan still has plenty of
+    # source pixels to round to and the pan stays smooth.
+    big_w, big_h = width * factor, height * factor
+    vf = (f"{crop},scale={big_w}:{big_h}:flags=lanczos,"
+         f"zoompan=z='{zoom_expr}':x='{x_expr}':y='{y_expr}':d={frames}:"
          f"s={width}x{height}:fps={fps},setsar=1")
 
     out_path = Path(out_path)
@@ -219,8 +287,8 @@ def static_clip(image_path, out_path, duration_s, cfg_render, cache_dir):
          "-preset", cfg_render["preset"], str(out_path)],
         f"ffmpeg could not render even a static clip from {image_path}",
         timeout=cfg_render.get("subshot_timeout_s", 300))
-    log.warning("sub-shot %s rendered as a motionless still after Ken Burns kept "
-                "timing out", out_path.name)
+    log.warning("sub-shot %s rendered as a motionless still, with no camera movement",
+                out_path.name)
     return out_path
 
 

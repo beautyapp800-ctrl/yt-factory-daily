@@ -4,20 +4,31 @@ Scope, deliberately minimal: no parallax, no subtitles, no music, no intro/outro
 that is stage 6. The goal here is a watchable MP4 that proves the pipeline reaches
 the end, not a finished product.
 
-Double exposure (required, see README): each generated image is shown twice, back
-to back, with a different Ken Burns camera movement each time - a push toward the
-left third, then the right, alternating push-in and pull-out across the video so it
-does not read as repetitive. This is not a visual flourish; it is how a 30 minute
-video's image budget fits Cloudflare's free daily Neuron allocation at all (see
-README's "Обов'язкова вимога" section) - half as many generated images, the same
-number of visible cuts.
+Double exposure (required, see README): each generated image is shown twice, with a
+different framing and a different zoom direction each time. This is not a visual
+flourish; it is how a 30 minute video's image budget fits Cloudflare's free daily
+Neuron allocation at all (see README's "Обов'язкова вимога" section) - half as many
+generated images, the same number of visible cuts.
+
+Spreading the repeats: the two showings used to sit back to back, which read as the
+same picture held for half a minute. They are now planned across a block of
+neighbouring scenes, so the order runs A B C A D B - every repeat has 2 to 4 other
+shots in front of it. The plan is seeded from the video id, so it is reproducible and
+a resumed run continues the same video rather than inventing a new one.
+
+The cost, stated plainly: a scene carries one image per 22 seconds of narration, so
+most scenes have one or two. There is no way to put other shots between an image's
+two showings using only that scene's own images - a one-image scene has nothing else
+to show. Spreading them therefore lets a picture drift up to a scene away from the
+words it was drawn for. plan_shots keeps blocks as short as the gap allows and logs
+how far pictures actually moved.
 
 Resumable per scene: output/<id>/clips/scene_XXX.mp4 is skipped if it already
 exists, so a failure partway through does not lose earlier scenes and a re-run
-picks up where it stopped. Crossfades (xfade, 0.6s by default) happen only at
-scene boundaries, in one chained ffmpeg pass across however many scene clips exist -
-not between the two exposures of the same image, which hard-cut.
+picks up where it stopped. Because the whole shot plan is computed up front from the
+video id, a resumed run reproduces exactly the plan of the run it resumes.
 """
+import random
 import time
 from pathlib import Path
 
@@ -32,48 +43,162 @@ DURATION_TOLERANCE_S = 1.0
 MIN_BYTES_PER_SECOND = 20_000       # ~160 kbps floor - catches a near-empty/broken file
 MAX_BYTES_PER_SECOND = 3_000_000    # ~24 Mbps ceiling - catches a runaway encode
 
+DEFAULT_MIN_BLOCK_IMAGES = 4
+DEFAULT_GAP_SHOTS = [2, 4]          # other shots between an image's two showings
 
-def _movement_for(global_index, movements):
-    return movements[global_index % len(movements)]
+
+def _blocks(scene_items, min_images):
+    """Consecutive scenes grouped until a group holds enough images to shuffle.
+
+    Each item is (scene_row, image_rows). A group closes as soon as it holds
+    min_images pictures, so groups stay as short as the requested gap allows -
+    typically two or three scenes - and a picture never travels far from its own
+    text. A short tail joins the previous group rather than forming a group too
+    small to interleave at all.
+    """
+    blocks, current, count = [], [], 0
+    for item in scene_items:
+        current.append(item)
+        count += len(item[1])
+        if count >= min_images:
+            blocks.append(current)
+            current, count = [], 0
+    if current:
+        if blocks:
+            blocks[-1].extend(current)
+        else:
+            blocks.append(current)
+    return blocks
 
 
-def _build_scene_clip(scene, images_rows, cfg_render, parts_dir, cache_dir, exposure_counter):
-    """One scene's clip: every image in the scene shown exposures_per_image times
-    with alternating camera movement, hard-cut concatenated. Returns the clip path.
+def _interleave(n_images, exposures, gaps):
+    """The order images appear in across one block's shot slots.
+
+    Returns a list of image indexes, length n_images * exposures. Every image's first
+    showing comes in scene order; each repeat is held back until gaps[image] other
+    shots have gone by. The result reads A B C A D B rather than A A B B C C.
+
+    An image is never placed directly after itself, including at the tail of a block
+    where the queue has to drain faster than the gaps asked for.
+    """
+    total = n_images * exposures
+    order, pending, next_new = [], [], 0
+    while len(order) < total:
+        ready = next((k for k, p in enumerate(pending) if p[0] <= len(order)), None)
+        if ready is not None:
+            _, img, left = pending.pop(ready)
+        elif next_new < n_images:
+            img, left, next_new = next_new, exposures, next_new + 1
+        else:
+            # Nothing is due yet and there are no first showings left: the tail of
+            # the block. Take whichever repeat has waited longest, skipping the
+            # picture just shown so draining cannot undo the point of this function.
+            pending.sort()
+            k = next((k for k, p in enumerate(pending) if p[1] != order[-1]), 0)
+            _, img, left = pending.pop(k)
+        order.append(img)
+        left -= 1
+        if left > 0:
+            pending.append([len(order) - 1 + gaps[img] + 1, img, left])
+    return _unstick(order)
+
+
+def _unstick(order):
+    """Swap apart any image that still ended up next to itself.
+
+    The queue in _interleave avoids this while it has a choice, but it can run out of
+    one at the very last slot of a block: if the only repeat still owing is the
+    picture just shown, it has nowhere else to go. Swapping it with some earlier slot
+    costs that slot nothing - the gaps are already approximate - and keeps the one
+    rule that matters absolutely, which is that a picture never follows itself.
+
+    A swap is kept only if it creates no new adjacency of its own. A block holding a
+    single picture has no valid swap at all; there the duplicate stays, because two
+    showings of one image is all there is to work with.
+    """
+    def collides(k):
+        return ((k > 0 and order[k] == order[k - 1]) or
+                (k + 1 < len(order) and order[k] == order[k + 1]))
+
+    for k in range(1, len(order)):
+        if order[k] != order[k - 1]:
+            continue
+        for j in range(len(order)):
+            if j == k or order[j] == order[k]:
+                continue
+            order[j], order[k] = order[k], order[j]
+            if not collides(j) and not collides(k):
+                break
+            order[j], order[k] = order[k], order[j]
+    return order
+
+
+def plan_shots(scene_items, cfg_render, seed):
+    """Decide, for the whole video, which image fills every shot slot, how long it is
+    held and which way the camera moves. Returns shot dicts in playback order.
+
+    Slot lengths come from the scene the slot belongs to: a scene keeps exactly its
+    own number of slots, each an equal share of its own narration. Changing which
+    picture fills a slot therefore cannot move a scene boundary and cannot drift the
+    video out of sync with the voice track.
+
+    Deterministic in `seed` (the video id): the same video always plans the same way,
+    so a resumed run continues the plan it is resuming instead of mixing two.
     """
     exposures = cfg_render["exposures_per_image"]
-    movements = cfg_render["movements"]
-    scene_duration = scene["duration_s"] or 0
-    per_image = scene_duration / max(1, len(images_rows))
-    per_exposure = per_image / exposures
+    min_images = cfg_render.get("shuffle_min_block_images", DEFAULT_MIN_BLOCK_IMAGES)
+    lo, hi = cfg_render.get("shuffle_gap_shots", DEFAULT_GAP_SHOTS)
+    lo, hi = max(1, lo), max(1, hi)
+    pairs = render.contrasting_pairs(cfg_render["movements"])
 
+    shots = []
+    for block_i, block in enumerate(_blocks(scene_items, min_images)):
+        rng = random.Random(f"{seed}:{block_i}")
+        images = [(scene, img) for scene, imgs in block for img in imgs]
+        slots = []
+        for scene, imgs in block:
+            count = len(imgs) * exposures
+            per_slot = (scene["duration_s"] or 0) / count
+            slots.extend((scene, per_slot) for _ in range(count))
+
+        gaps = [rng.randint(lo, hi) for _ in images]
+        moves = [pairs[rng.randrange(len(pairs))] for _ in images]
+        shown = {}
+        for slot_i, img_i in enumerate(_interleave(len(images), exposures, gaps)):
+            scene, per_slot = slots[slot_i]
+            exposure = shown.get(img_i, 0)
+            shown[img_i] = exposure + 1
+            home_scene, image_row = images[img_i]
+            shots.append({
+                "scene": scene,
+                "image": image_row,
+                "home_scene_idx": home_scene["idx"],
+                "movement": moves[img_i][exposure % len(moves[img_i])],
+                "duration_s": per_slot,
+                "exposure": exposure,
+            })
+    return shots
+
+
+def _build_scene_clip(scene, shots, cfg_render, parts_dir, cache_dir):
+    """Render one scene's shots as sub-clips and return their paths, in order."""
     sub_clips = []
-    for img_idx, image_row in enumerate(images_rows):
-        image_path = Path(image_row["path"])
-        if not image_path.exists():
-            log.warning("scene %d image %d: %s is missing, skipping that image",
-                        scene["idx"], img_idx, image_path)
-            continue
-        for e in range(exposures):
-            movement = _movement_for(exposure_counter["n"], movements)
-            exposure_counter["n"] += 1
-            sub_path = parts_dir / f"scene_{scene['idx']:03d}_img{img_idx:02d}_exp{e}.mp4"
-            if not sub_path.exists():
-                try:
-                    render.kenburns_clip(image_path, sub_path, per_exposure, movement,
-                                         cfg_render, cache_dir)
-                except render.RenderError as e_render:
-                    # Ken Burns timed out every attempt. Hold the frame still for the
-                    # same duration rather than dropping the shot: a gap here would
-                    # desync everything after it from the voice track.
-                    log.warning("scene %d image %d exposure %d: %s; falling back to a "
-                                "motionless shot", scene["idx"], img_idx, e, e_render)
-                    render.static_clip(image_path, sub_path, per_exposure, cfg_render,
-                                       cache_dir)
-            sub_clips.append(sub_path)
-
-    if not sub_clips:
-        raise RuntimeError(f"scene {scene['idx']} has no usable images to render")
+    for slot, shot in enumerate(shots):
+        image_path = Path(shot["image"]["path"])
+        sub_path = parts_dir / f"scene_{scene['idx']:03d}_slot{slot:02d}.mp4"
+        if not sub_path.exists():
+            try:
+                render.kenburns_clip(image_path, sub_path, shot["duration_s"],
+                                     shot["movement"], cfg_render, cache_dir)
+            except render.RenderError as e_render:
+                # Ken Burns timed out every attempt. Hold the frame still for the
+                # same duration rather than dropping the shot: a gap here would
+                # desync everything after it from the voice track.
+                log.warning("scene %d shot %d: %s; falling back to a motionless shot",
+                            scene["idx"], slot, e_render)
+                render.static_clip(image_path, sub_path, shot["duration_s"], cfg_render,
+                                   cache_dir)
+        sub_clips.append(sub_path)
     return sub_clips
 
 
@@ -97,38 +222,48 @@ def run(video_id, cfg):
     parts_dir.mkdir(parents=True, exist_ok=True)
     cache_dir.mkdir(parents=True, exist_ok=True)
 
+    scene_items = []
+    for scene in scenes:
+        images_rows = [row for row in db.get_scene_images(scene["id"])
+                       if row["path"] and Path(row["path"]).exists()]
+        if not images_rows:
+            log.warning("scene %d has no usable image file, skipping it entirely",
+                        scene["idx"])
+            continue
+        scene_items.append((scene, images_rows))
+    if not scene_items:
+        raise RuntimeError("no scene has a usable image; did the images stage run?")
+
+    shots = plan_shots(scene_items, cfg_render, video_id)
+    by_scene = {}
+    for shot in shots:
+        by_scene.setdefault(shot["scene"]["idx"], []).append(shot)
+
+    moved = [abs(s["scene"]["idx"] - s["home_scene_idx"]) for s in shots]
+    log.info("%d shots planned over %d scenes: %.0f%% play inside their own scene, "
+             "the rest at most %d scene(s) away",
+             len(shots), len(scene_items),
+             100 * sum(1 for d in moved if d == 0) / len(moved), max(moved))
+
     scene_clip_paths = []
-    exposure_counter = {"n": 0}
     built, skipped = 0, 0
 
-    for scene in scenes:
+    for scene, _ in scene_items:
         scene_clip = clips_dir / f"scene_{scene['idx']:03d}.mp4"
         if scene_clip.exists():
             skipped += 1
             scene_clip_paths.append(scene_clip)
-            # Keep the global movement cycle in step with what a fresh run would
-            # have produced, so a resumed run's untouched scenes do not throw off
-            # the alternation for the scenes still to come.
-            images_rows = db.get_scene_images(scene["id"])
-            exposure_counter["n"] += len(images_rows) * cfg_render["exposures_per_image"]
-            continue
-
-        images_rows = db.get_scene_images(scene["id"])
-        if not images_rows:
-            log.warning("scene %d has no images at all, skipping it entirely", scene["idx"])
             continue
 
         scene_t0 = time.time()
-        sub_clips = _build_scene_clip(scene, images_rows, cfg_render, parts_dir,
-                                      cache_dir, exposure_counter)
+        scene_shots = by_scene[scene["idx"]]
+        sub_clips = _build_scene_clip(scene, scene_shots, cfg_render, parts_dir, cache_dir)
         render.concat_clips(sub_clips, scene_clip)
         scene_clip_paths.append(scene_clip)
         built += 1
-        log.info("scene %d/%d clip built in %.1fs (%d images)", scene["idx"], len(scenes),
-                 time.time() - scene_t0, len(images_rows))
+        log.info("scene %d/%d clip built in %.1fs (%d shots)", scene["idx"], len(scenes),
+                 time.time() - scene_t0, len(scene_shots))
 
-    if not scene_clip_paths:
-        raise RuntimeError("no scene clips were produced for this video")
     log.info("%d scene clips built, %d already on disk and reused", built, skipped)
 
     log.info("cross-fading %d scene clips (%.1fs each)", len(scene_clip_paths),
