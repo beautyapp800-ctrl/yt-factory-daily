@@ -79,7 +79,12 @@ def synthesize_cloudflare(prompt, out_path, seed, cfg):
 
     settings = cloudflare_settings(cfg)
     url = CLOUDFLARE_API_BASE.format(account_id=account_id, model=settings["model"])
-    body = json.dumps({"prompt": prompt, "seed": seed, "steps": settings["steps"]}).encode()
+    # The live API rejects "seed" outright ("Additional or unevaluated properties
+    # '/seed' not allowed") despite the published docs listing it as accepted -
+    # confirmed against the real endpoint, not assumed. `seed` is still accepted as
+    # this function's own parameter and recorded in the db for traceability; it is
+    # just not sent on, so each call draws its own random image.
+    body = json.dumps({"prompt": prompt, "steps": settings["steps"]}).encode()
     req = urllib.request.Request(url, data=body, method="POST", headers={
         "Content-Type": "application/json",
         "Authorization": f"Bearer {token}",
