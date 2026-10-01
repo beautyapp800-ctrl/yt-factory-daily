@@ -40,13 +40,23 @@ class FakeFFmpeg:
 
     def __init__(self):
         self.kenburns_calls = []
+        self.static_calls = []
         self.concat_calls = []
         self.xfade_calls = []
         self.durations = {}   # path (str) -> duration, for probe_duration to report
         self.brightness = 150.0
+        self.kenburns_always_fails = False
 
     def kenburns_clip(self, image_path, out_path, duration_s, movement, cfg_render, cache_dir):
         self.kenburns_calls.append((str(image_path), duration_s, dict(movement)))
+        if self.kenburns_always_fails:
+            raise render.RenderError("Ken Burns timed out every attempt (simulated)")
+        Path(out_path).write_bytes(b"\x00")
+        self.durations[str(out_path)] = duration_s
+        return out_path
+
+    def static_clip(self, image_path, out_path, duration_s, cfg_render, cache_dir):
+        self.static_calls.append((str(image_path), duration_s))
         Path(out_path).write_bytes(b"\x00")
         self.durations[str(out_path)] = duration_s
         return out_path
@@ -83,9 +93,10 @@ class FakeFFmpeg:
 
 def _install_fake(fake):
     original = {name: getattr(render, name) for name in
-               ("kenburns_clip", "concat_clips", "xfade_chain", "mux_audio",
+               ("kenburns_clip", "static_clip", "concat_clips", "xfade_chain", "mux_audio",
                 "extract_preview", "probe_duration", "frame_brightness", "require_ffmpeg")}
     render.kenburns_clip = fake.kenburns_clip
+    render.static_clip = fake.static_clip
     render.concat_clips = fake.concat_clips
     render.xfade_chain = fake.xfade_chain
     render.mux_audio = fake.mux_audio
@@ -305,6 +316,27 @@ def test_missing_voice_raises(tmp):
         check("voice.mp3" in str(e), "the error names the actual problem")
 
 
+def test_static_fallback_keeps_timing_when_kenburns_fails(tmp):
+    print("test_static_fallback_keeps_timing_when_kenburns_fails")
+    vid = _setup_video(tmp, "staticfb", [24], images_per_scene=1)
+    fake = FakeFFmpeg()
+    fake.durations[str(config.output_dir(vid) / "voice.mp3")] = 24
+    fake.kenburns_always_fails = True
+    original = _install_fake(fake)
+    try:
+        check(stage.run(vid, {"render": RENDER_CFG}) is True,
+              "the stage completes even when Ken Burns fails for every sub-shot")
+    finally:
+        _restore(original)
+
+    check(len(fake.static_calls) == 2,
+          f"both exposures fell back to a motionless shot ({len(fake.static_calls)})")
+    durations = {round(d, 3) for _, d in fake.static_calls}
+    check(durations == {12.0},
+          f"the fallback holds each sub-shot's exact duration, so the voice track "
+          f"stays in sync ({durations})")
+
+
 if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
@@ -318,4 +350,5 @@ if __name__ == "__main__":
         test_duration_mismatch_raises(tmp)
         test_no_scenes_raises(tmp)
         test_missing_voice_raises(tmp)
+        test_static_fallback_keeps_timing_when_kenburns_fails(tmp)
     print("ALL RENDER TESTS PASSED")

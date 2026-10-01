@@ -143,22 +143,71 @@ def kenburns_clip(image_path, out_path, duration_s, movement, cfg_render, cache_
 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    started = time.time()
-    result = _run_ffmpeg(
-        ["-loop", "1", "-i", str(prescaled), "-vf", vf, "-t", f"{duration_s:.3f}",
-         "-r", str(fps), "-pix_fmt", "yuv420p", "-an",
-         "-c:v", "libx264", "-crf", str(cfg_render["crf"]), "-preset", cfg_render["preset"],
-         str(out_path)],
-        f"ffmpeg could not render a Ken Burns clip from {image_path}")
+    args = ["-loop", "1", "-i", str(prescaled), "-vf", vf, "-t", f"{duration_s:.3f}",
+            "-r", str(fps), "-pix_fmt", "yuv420p", "-an",
+            "-c:v", "libx264", "-crf", str(cfg_render["crf"]),
+            "-preset", cfg_render["preset"], str(out_path)]
 
-    elapsed = time.time() - started
-    reported = _frames_reported(result.stderr)
-    log.info("sub-shot %s: %.2fs wanted, d=%d, ffmpeg wrote %s frames, took %.1fs",
-             out_path.name, duration_s, frames,
-             reported if reported is not None else "?", elapsed)
-    if reported is not None and reported > frames * 1.5:
-        log.warning("sub-shot %s processed %d frames for a %d frame clip - ffmpeg is "
-                    "generating frames that -t then discards", out_path.name, reported, frames)
+    attempts = cfg_render.get("subshot_attempts", 3)
+    timeout = cfg_render.get("subshot_timeout_s", 300)
+    multiplier = cfg_render.get("subshot_timeout_multiplier", 2)
+
+    for attempt in range(1, attempts + 1):
+        started = time.time()
+        try:
+            result = _run_ffmpeg(
+                args, f"ffmpeg could not render a Ken Burns clip from {image_path}",
+                timeout=timeout)
+        except subprocess.TimeoutExpired:
+            # subprocess.run has already killed ffmpeg by this point. The output file
+            # is a truncated fragment, so it has to go before the retry, or a resumed
+            # run would later mistake it for a finished clip.
+            out_path.unlink(missing_ok=True)
+            log.warning("sub-shot %s hit the %ds timeout on attempt %d/%d; killed it, "
+                        "deleted the partial file, retrying", out_path.name, timeout,
+                        attempt, attempts)
+            timeout = int(timeout * multiplier)
+            continue
+
+        elapsed = time.time() - started
+        reported = _frames_reported(result.stderr)
+        log.info("sub-shot %s: %.2fs wanted, d=%d, ffmpeg wrote %s frames, took %.1fs",
+                 out_path.name, duration_s, frames,
+                 reported if reported is not None else "?", elapsed)
+        if reported is not None and reported > frames * 1.5:
+            log.warning("sub-shot %s processed %d frames for a %d frame clip - ffmpeg "
+                        "is generating frames that -t then discards",
+                        out_path.name, reported, frames)
+        return out_path
+
+    raise RenderError(f"Ken Burns for {out_path.name} timed out {attempts} times")
+
+
+def static_clip(image_path, out_path, duration_s, cfg_render, cache_dir):
+    """A still frame held for duration_s, with no camera movement at all.
+
+    The last resort when Ken Burns has timed out repeatedly. Deliberately not a
+    plain "skip": dropping the sub-shot would shorten the video against a voice
+    track that does not shorten with it, so everything after that point drifts out
+    of sync and the whole render then fails its own duration check. A motionless
+    shot costs one scene its movement; a missing shot costs the video. There is no
+    zoompan here, so this encodes in a fraction of the time.
+    """
+    width, height = cfg_render["width"], cfg_render["height"]
+    fps = cfg_render["fps"]
+    prescaled = prescale_image(image_path, cache_dir, width, height,
+                               cfg_render["upscale_factor"])
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    _run_ffmpeg(
+        ["-loop", "1", "-i", str(prescaled), "-vf", f"scale={width}:{height}:flags=lanczos",
+         "-t", f"{duration_s:.3f}", "-r", str(fps), "-pix_fmt", "yuv420p", "-an",
+         "-c:v", "libx264", "-crf", str(cfg_render["crf"]),
+         "-preset", cfg_render["preset"], str(out_path)],
+        f"ffmpeg could not render even a static clip from {image_path}",
+        timeout=cfg_render.get("subshot_timeout_s", 300))
+    log.warning("sub-shot %s rendered as a motionless still after Ken Burns kept "
+                "timing out", out_path.name)
     return out_path
 
 

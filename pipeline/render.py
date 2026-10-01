@@ -59,8 +59,17 @@ def _build_scene_clip(scene, images_rows, cfg_render, parts_dir, cache_dir, expo
             exposure_counter["n"] += 1
             sub_path = parts_dir / f"scene_{scene['idx']:03d}_img{img_idx:02d}_exp{e}.mp4"
             if not sub_path.exists():
-                render.kenburns_clip(image_path, sub_path, per_exposure, movement,
-                                     cfg_render, cache_dir)
+                try:
+                    render.kenburns_clip(image_path, sub_path, per_exposure, movement,
+                                         cfg_render, cache_dir)
+                except render.RenderError as e_render:
+                    # Ken Burns timed out every attempt. Hold the frame still for the
+                    # same duration rather than dropping the shot: a gap here would
+                    # desync everything after it from the voice track.
+                    log.warning("scene %d image %d exposure %d: %s; falling back to a "
+                                "motionless shot", scene["idx"], img_idx, e, e_render)
+                    render.static_clip(image_path, sub_path, per_exposure, cfg_render,
+                                       cache_dir)
             sub_clips.append(sub_path)
 
     if not sub_clips:

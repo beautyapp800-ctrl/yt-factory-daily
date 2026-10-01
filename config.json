@@ -65,6 +65,9 @@
     "zoom_max": 1.15,
     "exposures_per_image": 2,
     "preview_seconds": 60,
+    "subshot_timeout_s": 300,
+    "subshot_timeout_multiplier": 2,
+    "subshot_attempts": 3,
     "movements": [
       {"zoom": "in", "focus": "left"},
       {"zoom": "in", "focus": "right"},
