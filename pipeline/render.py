@@ -37,7 +37,7 @@ def _movement_for(global_index, movements):
     return movements[global_index % len(movements)]
 
 
-def _build_scene_clip(scene, images_rows, cfg_render, parts_dir, exposure_counter):
+def _build_scene_clip(scene, images_rows, cfg_render, parts_dir, cache_dir, exposure_counter):
     """One scene's clip: every image in the scene shown exposures_per_image times
     with alternating camera movement, hard-cut concatenated. Returns the clip path.
     """
@@ -59,7 +59,8 @@ def _build_scene_clip(scene, images_rows, cfg_render, parts_dir, exposure_counte
             exposure_counter["n"] += 1
             sub_path = parts_dir / f"scene_{scene['idx']:03d}_img{img_idx:02d}_exp{e}.mp4"
             if not sub_path.exists():
-                render.kenburns_clip(image_path, sub_path, per_exposure, movement, cfg_render)
+                render.kenburns_clip(image_path, sub_path, per_exposure, movement,
+                                     cfg_render, cache_dir)
             sub_clips.append(sub_path)
 
     if not sub_clips:
@@ -83,7 +84,9 @@ def run(video_id, cfg):
 
     clips_dir = out_dir / "clips"
     parts_dir = clips_dir / "_parts"
+    cache_dir = clips_dir / "_cache"
     parts_dir.mkdir(parents=True, exist_ok=True)
+    cache_dir.mkdir(parents=True, exist_ok=True)
 
     scene_clip_paths = []
     exposure_counter = {"n": 0}
@@ -106,13 +109,14 @@ def run(video_id, cfg):
             log.warning("scene %d has no images at all, skipping it entirely", scene["idx"])
             continue
 
+        scene_t0 = time.time()
         sub_clips = _build_scene_clip(scene, images_rows, cfg_render, parts_dir,
-                                      exposure_counter)
+                                      cache_dir, exposure_counter)
         render.concat_clips(sub_clips, scene_clip)
         scene_clip_paths.append(scene_clip)
         built += 1
-        if built % 10 == 0:
-            log.info("built %d/%d scene clips so far", built, len(scenes))
+        log.info("scene %d/%d clip built in %.1fs (%d images)", scene["idx"], len(scenes),
+                 time.time() - scene_t0, len(images_rows))
 
     if not scene_clip_paths:
         raise RuntimeError("no scene clips were produced for this video")

@@ -45,7 +45,7 @@ class FakeFFmpeg:
         self.durations = {}   # path (str) -> duration, for probe_duration to report
         self.brightness = 150.0
 
-    def kenburns_clip(self, image_path, out_path, duration_s, movement, cfg_render):
+    def kenburns_clip(self, image_path, out_path, duration_s, movement, cfg_render, cache_dir):
         self.kenburns_calls.append((str(image_path), duration_s, dict(movement)))
         Path(out_path).write_bytes(b"\x00")
         self.durations[str(out_path)] = duration_s

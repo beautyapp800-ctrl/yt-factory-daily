@@ -5,10 +5,24 @@ the tts stage and gets attached as-is, never touched.
 The zoompan jitter trap: ffmpeg's zoompan filter steps the crop window in whole
 source-pixels, so a gentle zoom on a 1920x1080 source forces each frame's crop to
 jump by uneven whole-pixel amounts - visible as stutter, not a smooth pan. Fixed by
-upscaling the source 4x before zoompan (so each step has four times the source
-pixels to round to) and scaling back down afterward. Measured directly: frame-to-
-frame pixel-difference variance was 36.8% without the upscale, 19.7% with it, on
-the same image and zoom path.
+upscaling the source before zoompan, so each step has more source pixels to round
+to - see prescale_image() for the two-step form this actually has to take.
+
+The first version of this fix upscaled correctly but then had zoompan itself
+output at that same huge size for every frame of the sub-shot's whole duration,
+re-encoded at 4x the final resolution - 16x the pixels of the delivered frame,
+for every single frame. Live on video 7, sub-shots that should take 20-40s took
+over an hour; one was still running after 67 minutes. The upscale only needs to
+happen ONCE per image, as a cached still (prescale_image); zoompan then crops
+directly down to the final width x height, every frame, which is both the
+correct fix and the fast one.
+
+Measured frame-to-frame pixel-difference variance (same image, same zoom path,
+lower is smoother): 36.8% with no upscale at all, 30.7% at upscale_factor=2,
+19.7% at upscale_factor=4 (the old, slow architecture), 16.9% at
+upscale_factor=3 with the cached-still architecture - which is both the
+smoothest measured and, because the upscale is a one-off per image rather than
+carried through every frame, by far the fastest.
 """
 import subprocess
 from pathlib import Path
@@ -62,16 +76,46 @@ def probe_duration(path):
     return float(result.stdout.strip())
 
 
-def kenburns_clip(image_path, out_path, duration_s, movement, cfg_render):
+def prescale_image(image_path, cache_dir, width, height, upscale_factor):
+    """Upscale a still image once to upscale_factor x the final resolution, cached by
+    source filename so every exposure of the same image (2 per image, by default)
+    reuses this one file instead of re-upscaling per sub-shot.
+
+    This is the fix for a real mistake the first version of this module made:
+    scaling up and having zoompan itself output at that same huge size, every frame,
+    for the whole sub-shot's duration - 16x the pixels of the final frame, encoded
+    repeatedly. Live on video 7, single sub-shots that should have taken 20-40s took
+    over an hour. The upscale only needs to happen ONCE per image, as a cached still;
+    zoompan should read that and crop straight down to the final delivery size.
+    """
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    big_w, big_h = width * upscale_factor, height * upscale_factor
+    cache_path = cache_dir / f"{Path(image_path).stem}_{big_w}x{big_h}.png"
+    if cache_path.exists():
+        return cache_path
+    _run_ffmpeg(["-i", str(image_path), "-vf", f"scale={big_w}:{big_h}:flags=lanczos",
+                "-frames:v", "1", str(cache_path)],
+               f"ffmpeg could not pre-scale {image_path}")
+    return cache_path
+
+
+def kenburns_clip(image_path, out_path, duration_s, movement, cfg_render, cache_dir):
     """One Ken Burns sub-shot from a still image: a slow zoom in or out, biased
-    toward the left/right/center third of the frame. Video only, no audio."""
+    toward the left/right/center third of the frame. Video only, no audio.
+
+    Reads from the cached upscaled still (prescale_image), and zoompan outputs
+    straight at the final width x height - no further downscale filter needed, which
+    is both simpler and the whole point of the fix above.
+    """
     width, height = cfg_render["width"], cfg_render["height"]
     fps = cfg_render["fps"]
     factor = cfg_render["upscale_factor"]
     zoom_max = cfg_render["zoom_max"]
-    big_w, big_h = width * factor, height * factor
     frames = max(1, round(duration_s * fps))
     fx = FOCUS_X.get(movement.get("focus", "center"), 0.5)
+
+    prescaled = prescale_image(image_path, cache_dir, width, height, factor)
 
     if movement.get("zoom") == "out":
         zoom_expr = f"{zoom_max}-({zoom_max}-1)*on/{frames}"
@@ -80,15 +124,13 @@ def kenburns_clip(image_path, out_path, duration_s, movement, cfg_render):
     x_expr = f"(iw*{fx})-(iw/zoom/2)"
     y_expr = "(ih/2)-(ih/zoom/2)"
 
-    vf = (f"scale={big_w}:{big_h}:flags=lanczos,"
-         f"zoompan=z='{zoom_expr}':x='{x_expr}':y='{y_expr}':d={frames}:"
-         f"s={big_w}x{big_h}:fps={fps},"
-         f"scale={width}:{height}:flags=lanczos")
+    vf = (f"zoompan=z='{zoom_expr}':x='{x_expr}':y='{y_expr}':d={frames}:"
+         f"s={width}x{height}:fps={fps}")
 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     _run_ffmpeg(
-        ["-loop", "1", "-i", str(image_path), "-vf", vf, "-t", f"{duration_s:.3f}",
+        ["-loop", "1", "-i", str(prescaled), "-vf", vf, "-t", f"{duration_s:.3f}",
          "-r", str(fps), "-pix_fmt", "yuv420p", "-an",
          "-c:v", "libx264", "-crf", str(cfg_render["crf"]), "-preset", cfg_render["preset"],
          str(out_path)],

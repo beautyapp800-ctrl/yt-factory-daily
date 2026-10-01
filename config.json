@@ -61,7 +61,7 @@
     "preset": "medium",
     "audio_bitrate_kbps": 192,
     "crossfade_s": 0.6,
-    "upscale_factor": 4,
+    "upscale_factor": 3,
     "zoom_max": 1.15,
     "exposures_per_image": 2,
     "preview_seconds": 60,
