@@ -1,8 +1,32 @@
+# Secrets. The repository is public (see README, step 9): anything committed here
+# is public forever, even if deleted in a later commit. Keys live in .env locally
+# and in GitHub Secrets for CI - never in the repo.
 .env
+.env.*
+!.env.example
+*.key
+*.pem
+credentials.json
+service_account.json
+
+# Generated per-video output: scripts, audio, images, clips, the finished video.
 output/
+
+# SQLite database and any stray database file.
 data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
 logs/
+
+# Piper voice models, ~236 MB, downloaded separately (see README).
+assets/voices/
+
+# Python
 __pycache__/
 *.pyc
 .venv/
-assets/voices/
+venv/
+.pytest_cache/
