@@ -41,10 +41,10 @@
   "image_style": "cinematic painterly illustration, muted earth tones, marble and weathered stone, soft volumetric light, quiet atmosphere, no text, no lettering, no watermark, no modern branding",
   "images": {
     "provider": "cloudflare",
-    "images_per_seconds": 12,
+    "images_per_seconds": 22,
     "cloudflare": {
       "model": "@cf/black-forest-labs/flux-1-schnell",
-      "steps": 4
+      "steps": 2
     },
     "pollinations": {
       "width": 1920,
