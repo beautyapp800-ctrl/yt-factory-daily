@@ -52,5 +52,26 @@
       "model": "flux",
       "delay_s": 16
     }
+  },
+  "render": {
+    "width": 1920,
+    "height": 1080,
+    "fps": 24,
+    "crf": 21,
+    "preset": "medium",
+    "audio_bitrate_kbps": 192,
+    "crossfade_s": 0.6,
+    "upscale_factor": 4,
+    "zoom_max": 1.15,
+    "exposures_per_image": 2,
+    "preview_seconds": 60,
+    "movements": [
+      {"zoom": "in", "focus": "left"},
+      {"zoom": "in", "focus": "right"},
+      {"zoom": "out", "focus": "left"},
+      {"zoom": "out", "focus": "right"},
+      {"zoom": "in", "focus": "center"},
+      {"zoom": "out", "focus": "center"}
+    ]
   }
 }
