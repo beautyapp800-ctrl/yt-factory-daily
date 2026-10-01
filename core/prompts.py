@@ -21,38 +21,49 @@ OUTLINE_SYSTEM = f"""{STYLE_RULES}
 You are planning a video. Reply with valid JSON only."""
 
 IMAGE_SYSTEM = """You write prompts for an image generator that illustrates a Stoicism video.
-The generator renders any text, label or logo you name as garbled pseudo-text, because
-the model you are writing for barely follows negative instructions - "no text" in the
-prompt does not stop it from drawing a label once you have described a box. The only
-reliable fix is to never put a text-bearing object in the description at all.
+
+Your first job is SPECIFICITY. The image must show the particular situation the scene
+describes, not its general mood. A scene about a man checking his phone in bed at two in
+the morning is not illustrated by "a quiet landscape at dawn" - that could sit under any
+scene in any video. Name one action or one object that the scene's own text mentions, and
+make it the thing the viewer sees.
+
+Your second job is to keep rendered text out of the frame, and the way to do that is NOT
+to avoid the object. Earlier versions banned every text-bearing noun outright and the
+results drifted into interchangeable scenery - safe, generic, illustrating nothing. Show
+the object WITHOUT its writing instead:
+  not "a box with a label"        but "hands holding a plain unmarked parcel"
+  not "a laptop on a desk"        but "screen light on a face in a dark room, the screen itself out of frame"
+  not "a shop sign above a door"  but "a lit doorway at dusk, the lettering lost in glare"
+  not "a newspaper on a table"    but "folded newsprint, face down, a cold mug beside it"
+The generator will draw garbled pseudo-text on any surface you tell it carries writing,
+so keep writing off-frame, turned away, out of focus or lost in light - but keep the
+object, because the object is what ties the picture to the scene.
 
 Rules for every prompt:
-- English, 15 to 30 words, describing one concrete scene, object or place.
-- No close-up faces and no real historical people. Use silhouettes, hands, backs turned, landscapes, objects, architecture, weather.
-- Never describe any of these, because each one invites rendered text or a recognisable
-  brand: a phone, laptop, tablet, monitor or TV screen; a box, package, bottle, can,
-  label or sign; a book, newspaper, document or poster; printed clothing or a logo on
-  an object.
-- Instead reach for things that carry no text by nature: landscapes, weather, light
-  through a window, architecture, stone, wood grain, fabric, water, empty rooms,
-  stairs, doorways, paths, plain furniture, unmarked dishes, plants, empty hands.
+- English, 15 to 30 words, describing one concrete moment.
+- Name one action or object taken from the scene's own text. That element must be visible.
+- No close-up faces and no real historical people. Hands, silhouettes, backs turned,
+  the view someone is looking at - all fine.
 - Describe what is visible, not what it means. No abstractions like "the concept of time".
 - Do not add a style description; the pipeline appends one.
 
 Reply with valid JSON only."""
 
-# Concrete nouns that reliably invite rendered pseudo-text or a recognisable brand once
-# an image model draws them. Checked against every image_prompt before it is sent to a
-# provider; a hit means the prompt gets rewritten rather than used as-is. "tv" is
-# matched as a whole word like the rest, via the word-boundary regex in
-# find_banned_image_words, not a special case.
+# Words that ARE the writing rather than the object carrying it. A box can be drawn
+# unmarked and a laptop can be drawn as light on a face, but a "label" or a "logo" has
+# nothing left once you take the lettering away, so naming one guarantees pseudo-text.
+#
+# This list used to be far longer and banned the objects themselves - phone, laptop,
+# box, bottle, book, paper. It worked: no more fake lettering. It also pushed the model
+# into interchangeable scenery, landscapes and doorways that illustrated no particular
+# scene, which cost more than the pseudo-text did. Objects are allowed again; only the
+# writing is not. See IMAGE_SYSTEM for how to show the object without its text.
 IMAGE_BANNED_WORDS = [
-    "laptop", "notebook computer", "screen", "monitor", "television", "tv",
-    "tablet", "phone", "smartphone", "ipad", "iphone",
-    "box", "package", "packaging", "parcel", "bottle", "can", "jar", "label", "sign",
-    "signage", "billboard", "placard", "tag", "price tag", "name tag", "sticker",
-    "book", "newspaper", "magazine", "document", "paper", "letter", "poster", "flyer",
-    "logo", "brand", "branded", "print", "printed",
+    "label", "labelled", "labeled", "sign", "signage", "signpost", "billboard",
+    "placard", "poster", "banner", "tag", "price tag", "name tag", "sticker",
+    "logo", "brand", "branded", "headline", "caption", "slogan", "nameplate",
+    "inscription", "engraving", "lettering", "writing on", "text on",
 ]
 
 # A prompt that spells out a literal amount or line of text ("a price tag reading
@@ -79,21 +90,20 @@ def find_banned_image_words(text):
 
 
 def image_prompt_fix_request(original_prompt, banned_hits):
-    """Ask the model to redraw the same moment without the flagged nouns."""
-    return f"""This image prompt describes something that will render as garbled text or a
-recognisable brand once generated:
+    """Ask the model to keep the same object and moment, minus the writing on it."""
+    return f"""This image prompt names writing that an image generator will render as
+garbled pseudo-text:
 
 "{original_prompt}"
 
-The problem: it names {", ".join(banned_hits)}, which an image model cannot draw
-without inventing fake lettering or logos on it.
+The problem: {", ".join(banned_hits)}. Those are the lettering itself, not the thing
+carrying it.
 
-Rewrite it as a different concrete image for the same moment and mood, 15 to 30 words,
-English, that uses none of: phones, laptops, tablets, screens, boxes, packaging,
-bottles, cans, labels, signs, books, newspapers, documents, posters, logos or printed
-clothing. Reach for landscapes, light, architecture, stone, wood, fabric, water, empty
-rooms, stairs, doorways, paths, plain furniture, unmarked objects, plants or empty
-hands instead. No style description; that is appended separately.
+Rewrite it for the SAME moment and the SAME object, 15 to 30 words, English, showing
+that object without any writing on it - unmarked, turned away, face down, out of focus,
+or with the lettering lost in glare. Do not replace the object with scenery: a quiet
+landscape would illustrate nothing in particular, and keeping the object is the whole
+point. No style description; that is appended separately.
 
 Reply with the rewritten prompt only, no quotes, no JSON, no explanation."""
 

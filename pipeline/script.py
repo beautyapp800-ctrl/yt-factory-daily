@@ -428,6 +428,12 @@ talks about.
 
 {listed}
 
+For every prompt, pick one action or one object that the scene's own words mention, and
+make it the thing the picture shows. A viewer who saw only the image should be able to
+point at which scene it belongs to. A general mood piece - a landscape, an empty room,
+light through a window with nothing happening - could sit under any scene in any video
+and is a failure here, however pretty.
+
 Return JSON: {{"prompts": [{{"scene": <number>, "prompt": "<15 to 30 words>"}}, ...]}}
 One entry for every scene listed, using the same scene numbers. JSON only."""
     data = complete_json(prompt, system=IMAGE_SYSTEM, max_tokens=1800, temperature=0.8)

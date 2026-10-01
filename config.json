@@ -38,7 +38,7 @@
       "bitrate_kbps": 192
     }
   },
-  "image_style": "cinematic painterly illustration, muted earth tones, marble and weathered stone, soft volumetric light, quiet atmosphere, no text, no lettering, no watermark, no modern branding",
+  "image_style": "cinematic painterly illustration, wide horizontal composition, key subject within the central horizontal band, cinematic framing, muted earth tones, marble and weathered stone, soft volumetric light, quiet atmosphere, no text, no lettering, no watermark, no modern branding",
   "images": {
     "provider": "cloudflare",
     "images_per_seconds": 22,
