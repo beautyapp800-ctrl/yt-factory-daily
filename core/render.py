@@ -101,6 +101,15 @@ def prescale_image(image_path, cache_dir, width, height, upscale_factor):
     repeatedly. Live on video 7, single sub-shots that should have taken 20-40s took
     over an hour. The upscale only needs to happen ONCE per image, as a cached still;
     zoompan should read that and crop straight down to the final delivery size.
+
+    Crops to the target aspect first, and pins SAR to 1. Cloudflare's flux-1-schnell
+    takes no width/height at all - its schema is prompt and steps - and returns square
+    1024x1024 images whatever the config asks for. Scaling a square straight to
+    5760x3240 stretches it, and ffmpeg then quietly sets a compensating 9:16 sample
+    aspect ratio, so the finished mp4 was 1920x1080 pixels tagged as 1:1 display
+    aspect: players drew it as a square with black bars down both sides. A centred
+    crop to 16:9 before scaling gives a true widescreen frame with no bars and no
+    distortion; setsar=1 makes sure nothing re-introduces a non-square pixel.
     """
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -108,7 +117,10 @@ def prescale_image(image_path, cache_dir, width, height, upscale_factor):
     cache_path = cache_dir / f"{Path(image_path).stem}_{big_w}x{big_h}.png"
     if cache_path.exists():
         return cache_path
-    _run_ffmpeg(["-i", str(image_path), "-vf", f"scale={big_w}:{big_h}:flags=lanczos",
+    # min(...) on both axes handles a source that is too wide as well as too tall.
+    crop = f"crop='min(iw,ih*{width}/{height})':'min(ih,iw*{height}/{width})'"
+    _run_ffmpeg(["-i", str(image_path),
+                "-vf", f"{crop},scale={big_w}:{big_h}:flags=lanczos,setsar=1",
                 "-frames:v", "1", str(cache_path)],
                f"ffmpeg could not pre-scale {image_path}")
     return cache_path
@@ -139,7 +151,7 @@ def kenburns_clip(image_path, out_path, duration_s, movement, cfg_render, cache_
     y_expr = "(ih/2)-(ih/zoom/2)"
 
     vf = (f"zoompan=z='{zoom_expr}':x='{x_expr}':y='{y_expr}':d={frames}:"
-         f"s={width}x{height}:fps={fps}")
+         f"s={width}x{height}:fps={fps},setsar=1")
 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -200,7 +212,8 @@ def static_clip(image_path, out_path, duration_s, cfg_render, cache_dir):
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     _run_ffmpeg(
-        ["-loop", "1", "-i", str(prescaled), "-vf", f"scale={width}:{height}:flags=lanczos",
+        ["-loop", "1", "-i", str(prescaled),
+         "-vf", f"scale={width}:{height}:flags=lanczos,setsar=1",
          "-t", f"{duration_s:.3f}", "-r", str(fps), "-pix_fmt", "yuv420p", "-an",
          "-c:v", "libx264", "-crf", str(cfg_render["crf"]),
          "-preset", cfg_render["preset"], str(out_path)],
