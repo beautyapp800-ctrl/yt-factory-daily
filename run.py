@@ -5,7 +5,7 @@ from datetime import datetime
 from core import db
 from core.config import ConfigError, load_config
 from core.logger import get_logger
-from pipeline import images, render, script, seo, thumbnail, topic, tts, upload
+from pipeline import images, render, script, seo, thumbnail, topic, tts
 
 log = get_logger("run")
 
@@ -20,7 +20,9 @@ STAGES = [
     # which is the seo stage's output, not the script's working title.
     ("seo", seo, "seo"),
     ("thumbnail", thumbnail, "thumbnail"),
-    ("upload", upload, "upload"),
+    # No upload here on purpose. Production ends at status `ready`; publication is a separate
+    # process on its own schedule (publish.py), so a slow or failed render can never make
+    # a publishing day late. See README, "виробництво окремо від публікації".
 ]
 
 

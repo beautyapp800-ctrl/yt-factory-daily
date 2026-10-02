@@ -119,5 +119,10 @@
         "focus": "center"
       }
     ]
+  },
+  "youtube": {
+    "category_id": "22",
+    "default_language": "en",
+    "chunk_mb": 8
   }
 }

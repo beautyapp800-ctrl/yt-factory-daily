@@ -2,3 +2,5 @@ piper-tts
 edge-tts
 Pillow
 pytesseract
+google-auth-oauthlib
+google-api-python-client

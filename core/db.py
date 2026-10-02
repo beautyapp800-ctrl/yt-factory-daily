@@ -196,6 +196,24 @@ def get_video_images(video_id):
         return [dict(r) for r in rows]
 
 
+def oldest_ready():
+    """The oldest finished video that has not been uploaded yet, or None. This is the
+    publish queue: production leaves videos at 'ready', publish.py takes them from here."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM videos WHERE status = 'ready' "
+            "AND (youtube_id IS NULL OR youtube_id = '') ORDER BY created_at, id LIMIT 1"
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def count_ready():
+    with _connect() as conn:
+        return conn.execute(
+            "SELECT COUNT(*) FROM videos WHERE status = 'ready' "
+            "AND (youtube_id IS NULL OR youtube_id = '')").fetchone()[0]
+
+
 def log_event(video_id, stage, level, msg):
     with _connect() as conn:
         conn.execute(
