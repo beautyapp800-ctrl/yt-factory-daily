@@ -16,8 +16,10 @@ STAGES = [
     ("tts", tts, "tts"),
     ("images", images, "images"),
     ("render", render, "rendering"),
-    ("thumbnail", thumbnail, "thumbnail"),
+    # seo before thumbnail: the thumbnail's words are taken from the final YouTube title,
+    # which is the seo stage's output, not the script's working title.
     ("seo", seo, "seo"),
+    ("thumbnail", thumbnail, "thumbnail"),
     ("upload", upload, "upload"),
 ]
 

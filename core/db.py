@@ -6,7 +6,7 @@ from pathlib import Path
 DB_PATH = Path(__file__).resolve().parent.parent / "data" / "factory.db"
 
 STATUSES = ("pending", "scripting", "tts", "images", "rendering",
-            "thumbnail", "seo", "upload", "ready", "uploading", "published", "failed")
+            "seo", "thumbnail", "upload", "ready", "uploading", "published", "failed")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS videos (
@@ -62,10 +62,14 @@ CREATE TABLE IF NOT EXISTS events (
 """
 
 _VIDEO_FIELDS = {"topic", "title", "status", "duration_s", "video_path",
-                 "thumbnail_path", "youtube_id", "published_at", "error", "seed"}
+                 "thumbnail_path", "youtube_id", "published_at", "error", "seed",
+                 "seo_title", "description", "tags"}
 
 # Columns added after the first release, applied to existing databases by _migrate().
-_MIGRATIONS = [("videos", "seed", "TEXT")]
+# `title` is the script's working title; `seo_title` is the one published on YouTube
+# (the seo stage writes it, upload prefers it). `tags` is a JSON list.
+_MIGRATIONS = [("videos", "seed", "TEXT"), ("videos", "seo_title", "TEXT"),
+               ("videos", "description", "TEXT"), ("videos", "tags", "TEXT")]
 
 
 def _now():

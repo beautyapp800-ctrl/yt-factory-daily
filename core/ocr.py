@@ -80,3 +80,18 @@ def detect_text(image_path, min_confidence=60):
             confidences.append(conf)
     mean_conf = sum(confidences) / len(confidences) if confidences else 0
     return chars, mean_conf
+
+
+def read_text(image, psm=6):
+    """Whatever text Tesseract reads from a PIL image, as one string ('' if OCR is
+    unavailable or fails). Unlike detect_text this keeps low-confidence reads, because
+    the caller wants to know what a legible-or-not piece of real lettering says."""
+    if not available():
+        return ""
+    import pytesseract
+    pytesseract.pytesseract.tesseract_cmd = _resolved_cmd
+    try:
+        return pytesseract.image_to_string(image, config=f"--psm {psm}")
+    except Exception as e:
+        log.warning("OCR failed: %s", e)
+        return ""
