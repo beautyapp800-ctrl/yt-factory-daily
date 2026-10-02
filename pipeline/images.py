@@ -183,6 +183,7 @@ def run(video_id, cfg):
     made, duplicated, failed, ocr_regenerated = 0, 0, 0, 0
     by_provider = {}
     neuron_samples = []
+    neurons_total, cf_calls = 0.0, 0     # every Cloudflare call, OCR regenerations included
     last_success_path = None
 
     for scene, count in plan:
@@ -229,6 +230,9 @@ def run(video_id, cfg):
                     log.info("neuron sample %d/%d: %.1f", len(neuron_samples),
                              NEURON_SAMPLE_SIZE, neurons)
 
+                if used == "cloudflare":
+                    cf_calls += 1
+                    neurons_total += neurons or 0
                 chars, mean_conf = ocr.detect_text(out_path)
                 if chars > OCR_MIN_CHARS:
                     log.warning("scene %d image %d/%d: OCR read %d confident "
@@ -237,6 +241,9 @@ def run(video_id, cfg):
                     try:
                         used2, neurons2 = images.synthesize(prompt, out_path, seed + 500, cfg)
                         used, neurons = used2, neurons2
+                        if used2 == "cloudflare":
+                            cf_calls += 1
+                            neurons_total += neurons2 or 0
                         ocr_regenerated += 1
                         chars2, _ = ocr.detect_text(out_path)
                         if chars2 > OCR_MIN_CHARS:
@@ -269,10 +276,16 @@ def run(video_id, cfg):
              "%d OCR regenerations", made, duplicated, failed, total_planned,
              ", ".join(f"{k}={v}" for k, v in by_provider.items()) or "none",
              ocr_regenerated)
+    if cf_calls:
+        log.info("neurons actually used: %.0f over %d Cloudflare calls (%.1f each), %.0f%% of "
+                 "the %d/day free allowance", neurons_total, cf_calls,
+                 neurons_total / cf_calls, 100 * neurons_total / DAILY_FREE_NEURONS,
+                 DAILY_FREE_NEURONS)
     db.log_event(video_id, "images", "info",
                  f"{made} made, {duplicated} duplicated, {failed} failed of "
                  f"{total_planned} planned ({by_provider}), {ocr_regenerated} "
-                 f"OCR regenerations, {fixed_count} prompts rewritten")
+                 f"OCR regenerations, {fixed_count} prompts rewritten, "
+                 f"{neurons_total:.0f} neurons over {cf_calls} Cloudflare calls")
 
     if made == 0 and duplicated == 0:
         raise RuntimeError(f"no images were produced for any of {len(scenes)} scenes")

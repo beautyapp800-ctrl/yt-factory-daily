@@ -399,6 +399,28 @@ def test_fixed_prompt_keeps_its_style_suffix(tmp):
     check(all(p == stored for p in seen), "the provider was sent the full prompt, style included")
 
 
+def test_total_neurons_are_counted_across_all_calls(tmp):
+    print("test_total_neurons_are_counted_across_all_calls")
+    vid = _setup_video(tmp, "neurontotal", [24, 24], prompts=["A courtyard at dawn", "A quiet corridor"])
+
+    def fake_cf(prompt, out_path, seed, cfg):
+        Path(out_path).write_bytes(b"\xff\xd8\xff" + b"\x00" * 50)
+        return out_path, 96.0
+
+    original = _stub(cloudflare=fake_cf, llm_complete=lambda prompt, **kw: "x")
+    try:
+        stage.run(vid, {"images": {"provider": "cloudflare", "images_per_seconds": 12}})
+    finally:
+        _restore(original)
+    import sqlite3
+    from contextlib import closing
+    with closing(sqlite3.connect(db.DB_PATH)) as conn:
+        messages = [r[0] for r in conn.execute(
+            "SELECT message FROM events WHERE video_id = ? AND stage = 'images'", (vid,))]
+    check(any("384 neurons over 4 Cloudflare calls" in m for m in messages),
+          f"4 images at 96 each are reported as 384 in the events table ({messages})")
+
+
 def test_ocr_triggers_one_regeneration(tmp):
     print("test_ocr_triggers_one_regeneration")
     vid = _setup_video(tmp, "ocr", [24])   # 2 images
@@ -467,6 +489,7 @@ if __name__ == "__main__":
         test_clean_prompt_skips_the_llm(tmp)
         test_style_suffix_is_not_scanned_for_banned_words(tmp)
         test_fixed_prompt_keeps_its_style_suffix(tmp)
+        test_total_neurons_are_counted_across_all_calls(tmp)
         test_ocr_triggers_one_regeneration(tmp)
         test_ocr_gives_up_after_one_retry(tmp)
     print("ALL IMAGES TESTS PASSED")
