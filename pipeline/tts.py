@@ -1,8 +1,8 @@
 """Stage 3: voice the script, sentence by sentence.
 
 Every sentence is synthesized on its own, so its real spoken duration is known and
-sentences can carry silence between them: 350ms within a scene, 700ms between scenes,
-1400ms wherever a new part of the script begins (hook -> lesson 1, lesson N -> lesson
+sentences can carry silence between them: 220ms within a scene, 450ms between scenes,
+900ms wherever a new part of the script begins (hook -> lesson 1, lesson N -> lesson
 N+1, lesson 10 -> outro). Sentences belonging to one scene are then concatenated into
 that scene's own wav (scenes.audio_path / duration_s, unchanged in shape from before),
 and all scenes plus their connecting silences are concatenated into one raw track.

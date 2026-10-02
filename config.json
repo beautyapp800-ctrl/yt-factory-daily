@@ -9,7 +9,7 @@
   "privacy_status": "private",
   "aspect": "16:9",
   "voice": "en_US-ryan-high",
-  "words_per_minute": 179,
+  "words_per_minute": 166,
   "lessons_per_video": 10,
   "llm": {
     "groq_model": "openai/gpt-oss-120b",
@@ -23,13 +23,13 @@
       "length_scale": 1.08
     },
     "edge": {
-      "voice": "en-US-GuyNeural",
+      "voice": "en-US-AndrewMultilingualNeural",
       "rate": "-5%"
     },
     "pauses": {
-      "sentence_ms": 350,
-      "scene_ms": 700,
-      "lesson_ms": 1400
+      "sentence_ms": 220,
+      "scene_ms": 450,
+      "lesson_ms": 900
     },
     "mastering": {
       "target_lufs": -14,

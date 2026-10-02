@@ -7,6 +7,10 @@ config.words_per_minute was a guess, not a measurement (145, picked before any a
 existed). The voice is judged by ear; the pace it actually speaks at is not, so this
 renders one continuous 300-word excerpt at rate 0%, -5%, -10%, -15% and reports the
 real words-per-minute for each, with no pauses inserted - the pure speaking rate.
+
+The voice is whatever config.tts.edge.voice says. The number that goes into
+config.words_per_minute is best taken from the real tts stage's own log line on a whole
+video (words / seconds spoken), which this excerpt only approximates.
 """
 import sys
 from pathlib import Path
@@ -14,12 +18,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core import text as txt, tts
-from core.config import OUTPUT_DIR
+from core.config import OUTPUT_DIR, load_config
 from core.logger import get_logger
 
 log = get_logger("calibrate")
 
-VOICE = "en-US-GuyNeural"
+VOICE = tts.provider_settings(load_config())[1]["voice"]
 # edge-tts requires an explicit sign on the rate string (its own validator rejects a
 # bare "0%"), so the neutral rate is written "+0%".
 RATES = ["+0%", "-5%", "-10%", "-15%"]

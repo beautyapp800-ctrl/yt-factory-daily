@@ -33,14 +33,14 @@ FFMPEG_INSTALL_HINT = (
 
 DEFAULT_PIPER_VOICE = "en_US-ryan-high"
 DEFAULT_PIPER_LENGTH_SCALE = 1.08
-DEFAULT_EDGE_VOICE = "en-US-GuyNeural"
-DEFAULT_EDGE_RATE = "-8%"
+DEFAULT_EDGE_VOICE = "en-US-AndrewMultilingualNeural"
+DEFAULT_EDGE_RATE = "-5%"
 
 # Candidates downloaded / offered for the by-ear comparison. Not all of these need
 # to be the one config.json picks; they are what scripts/tts_sample.py renders.
 PIPER_VOICES = ["en_US-ryan-high", "en_GB-alan-medium", "en_US-joe-medium"]
-EDGE_VOICES = ["en-US-GuyNeural", "en-GB-RyanNeural", "en-US-BrianNeural",
-               "en-US-ChristopherNeural"]
+EDGE_VOICES = ["en-US-AndrewMultilingualNeural", "en-US-GuyNeural", "en-GB-RyanNeural",
+               "en-US-BrianNeural"]
 
 SAMPLE_RATE = 22050
 
@@ -265,7 +265,7 @@ def mastering_settings(cfg):
 def pause_settings(cfg):
     block = (cfg.get("tts") or {}).get("pauses") or {}
     return {
-        "sentence_ms": block.get("sentence_ms", 350),
-        "scene_ms": block.get("scene_ms", 700),
-        "lesson_ms": block.get("lesson_ms", 1400),
+        "sentence_ms": block.get("sentence_ms", 220),
+        "scene_ms": block.get("scene_ms", 450),
+        "lesson_ms": block.get("lesson_ms", 900),
     }

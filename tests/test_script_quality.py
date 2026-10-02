@@ -159,10 +159,20 @@ def test_outro_target():
     check(sc.OPENING_REWRITES == 2, "a clashing opening gets two attempts")
 
 
+def test_clean_spaces_punctuation_without_corrupting_it():
+    print("test_clean_spaces_punctuation_without_corrupting_it")
+    # The replacement for "comma with no space after it" had been committed as a control
+    # character instead of a backreference, so "Wait,what" came out as "Wait<SOH> what".
+    out = txt.clean("Wait,what happened;really:no 6:15 and 1,000 ok")
+    check(out == "Wait, what happened; really: no 6:15 and 1,000 ok", f"punctuation is spaced ({out!r})")
+    check(not any(ord(c) < 32 for c in out), "and nothing unprintable is inserted")
+
+
 if __name__ == "__main__":
     for test in (test_title_ban, test_trimming, test_trim_to_budget,
                  test_hook_preview_detector, test_duplicate_openings,
                  test_domain_diversity, test_forbidden_opening_prefixes,
-                 test_name_tics, test_outro_target):
+                 test_name_tics, test_outro_target,
+                 test_clean_spaces_punctuation_without_corrupting_it):
         test()
     print("ALL SCRIPT QUALITY TESTS PASSED")

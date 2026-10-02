@@ -153,7 +153,7 @@ def test_pause_placement_and_timings(tmp):
     try:
         cfg = {"words_per_minute": 145,
               "tts": {"provider": "piper",
-                      "pauses": {"sentence_ms": 350, "scene_ms": 700, "lesson_ms": 1400}}}
+                      "pauses": {"sentence_ms": 220, "scene_ms": 450, "lesson_ms": 900}}}
         check(stage.run(vid, cfg) is True, "the stage completes with stubbed audio")
     finally:
         _restore(original)
@@ -168,15 +168,15 @@ def test_pause_placement_and_timings(tmp):
     word_seconds = 6 / WORDS_PER_SECOND        # "This is the hook sentence here." = 6 words
     check(abs(timings[0]["end_s"] - word_seconds) < 0.01, "first sentence duration matches its word count")
 
-    # lesson0's first sentence (index 1) is a lesson boundary -> 1400ms gap before it.
+    # lesson0's first sentence (index 1) is a lesson boundary -> 900ms gap before it.
     gap = timings[1]["start_s"] - timings[0]["end_s"]
-    check(abs(gap - 1.4) < 0.01, f"lesson-boundary gap is 1.4s ({gap:.3f})")
+    check(abs(gap - 0.9) < 0.01, f"lesson-boundary gap is 0.9s ({gap:.3f})")
 
     # lesson0's second sentence (index 2) is mid-scene... actually each sentence is its
     # own scene here (one sentence per scene, see _setup_video), so this is a new SCENE
-    # but not a lesson boundary -> 700ms gap.
+    # but not a lesson boundary -> 450ms gap.
     gap2 = timings[2]["start_s"] - timings[1]["end_s"]
-    check(abs(gap2 - 0.7) < 0.01, f"ordinary scene gap is 0.7s ({gap2:.3f})")
+    check(abs(gap2 - 0.45) < 0.01, f"ordinary scene gap is 0.45s ({gap2:.3f})")
 
     check(all(s["audio_path"] for s in scenes), "every scene got an audio_path")
     check(all(s["duration_s"] is not None for s in scenes), "every scene got a duration_s")
@@ -225,7 +225,7 @@ def test_mid_scene_lesson_boundary(tmp):
     # timings[1] is lesson0's sentence (scene 2, local index 0); timings[2] is
     # lesson1's sentence (scene 2, local index 1) - same scene, but a lesson boundary.
     gap = timings[2]["start_s"] - timings[1]["end_s"]
-    check(abs(gap - 1.4) < 0.01,
+    check(abs(gap - 0.9) < 0.01,
           f"the lesson-boundary pause fires mid-scene, not just between scenes ({gap:.3f})")
 
 
@@ -315,13 +315,13 @@ def test_provider_settings():
 def test_pause_and_mastering_settings():
     print("test_pause_and_mastering_settings")
     p = tts.pause_settings({})
-    check((p["sentence_ms"], p["scene_ms"], p["lesson_ms"]) == (350, 700, 1400),
-          "default pauses match the spec (350/700/1400ms)")
+    check((p["sentence_ms"], p["scene_ms"], p["lesson_ms"]) == (220, 450, 900),
+          "default pauses match the spec (220/450/900ms)")
     m = tts.mastering_settings({})
     check(m["target_lufs"] == -14 and m["highpass_hz"] == 80 and m["sample_rate"] == 48000
           and m["bitrate_kbps"] == 192, "default mastering settings match the spec")
     p2 = tts.pause_settings({"tts": {"pauses": {"lesson_ms": 2000}}})
-    check(p2["lesson_ms"] == 2000 and p2["sentence_ms"] == 350,
+    check(p2["lesson_ms"] == 2000 and p2["sentence_ms"] == 220,
           "a partial override keeps the other defaults")
 
 

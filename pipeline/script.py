@@ -16,6 +16,7 @@ from core import db, text as txt
 from core.config import output_dir
 from core.llm import complete, complete_json
 from core.logger import get_logger
+from core.tts import pause_settings as tts_pause_settings
 from core.prompts import (CONCRETE_DETAIL_RULE, DOMAINS, EXAMPLE_TITLES, IMAGE_SYSTEM,
                           LESSON_FORM_RULES, MAX_LESSONS_PER_DOMAIN,
                           NARRATION_SYSTEM, OUTLINE_SYSTEM, SCENE_SETTINGS,
@@ -27,7 +28,14 @@ HOOK_WORDS = 200
 # 140, not 200: the model gave 126, 142 and 159 across three runs whatever it was
 # asked for, and a short close is not a fault, so the budget now matches reality.
 OUTRO_WORDS = 140
-WORD_TOLERANCE = 0.15          # total script must land within +/-15% of budget
+# The script has to land inside 28-32 minutes for a 30 minute target, i.e. +-6.7%. The
+# word budget is the centre of that window. 4% of it is allowed to the word count, which
+# is 28.8-31.2 minutes at the nominal pace; the rest is left for the pace itself, which
+# is not constant: measured on two whole videos, the same voice speaks 169.8 and 162.7
+# words a minute (166.2 pooled, and that is what config.words_per_minute holds), a spread
+# of about +-2.5% that moves a 30 minute video by ~0.7 min either way. It was 15%, which
+# allowed 25.5-34.5 minutes.
+WORD_TOLERANCE = 0.04
 # Ordering 340 for a wanted 395 (ratio 0.86) landed video 4 at 3710 words, twelve words
 # above the floor that fails the whole script: with the tighter prompts the model stopped
 # overshooting and delivered 262-383 words per lesson. The two failure modes cost very
@@ -43,14 +51,60 @@ MAX_FIX_ROUNDS = 3
 LESSONS_PER_FIX_ROUND = 5
 OUTLINE_ATTEMPTS = 3
 MAX_HOOK_TITLE_HITS = 2        # a hook naming more titles than this is previewing
-# Fraction of the runtime reserved for pause silence (sentence/scene/lesson gaps),
-# not available for speaking. words_per_minute is a measured rate with no pauses in
-# it, so the raw budget has to shrink by this much to still fit target_duration_min.
-PAUSE_RESERVE_RATIO = 0.07
+# Script structure, measured over the five generated scripts (videos 3-7, 21,413 words):
+# a sentence every 21.4 words and a scene every 92.3 words. The pauses between sentences
+# and scenes are counted from these, so the word budget follows config.tts.pauses
+# instead of a fixed share of the runtime that went stale the moment the pauses changed.
+SENTENCES_PER_WORD = 0.0468
+SCENES_PER_WORD = 0.01083
 OPENING_WORDS = 4              # parts sharing this many opening words clash
 OPENING_REWRITES = 2           # attempts to shift a clashing opening before giving up
 MAX_NAME_USES = 3              # a name used more than this is swapped for another
 TICS_FROM_VIDEOS = 10          # how far back to look for names and colours to avoid
+
+
+def _runtime_model(cfg):
+    """(seconds per word, fixed seconds) such that runtime = words * a + b.
+
+    Runtime = speaking time + pause time. words_per_minute is the measured speaking rate
+    with no pauses in it; the pauses (config.tts.pauses) fall in three places - between
+    sentences inside a scene, between scenes, and before each lesson and the outro - and
+    the first two scale with the length of the script, so runtime is linear in the word
+    count W:
+
+        runtime_s = W * (60/wpm + (sps - scn) * sentence_gap + scn * scene_gap)
+                    + parts * (lesson_gap - scene_gap)
+
+    where sps/scn are sentences and scenes per word (measured, above) and parts is the
+    number of lesson-sized breaks: every lesson plus the outro.
+    """
+    pauses = tts_pause_settings(cfg)
+    sentence_gap = pauses["sentence_ms"] / 1000
+    scene_gap = pauses["scene_ms"] / 1000
+    lesson_gap = pauses["lesson_ms"] / 1000
+    parts = int(cfg.get("lessons_per_video", 10)) + 1
+    per_word = (60 / int(cfg["words_per_minute"])
+                + (SENTENCES_PER_WORD - SCENES_PER_WORD) * sentence_gap
+                + SCENES_PER_WORD * scene_gap)
+    return per_word, parts * (lesson_gap - scene_gap)
+
+
+def word_budget(cfg):
+    """How many words fill target_duration_min of finished narration, pauses included."""
+    per_word, fixed_s = _runtime_model(cfg)
+    return round((int(cfg["target_duration_min"]) * 60 - fixed_s) / per_word)
+
+
+def estimated_runtime_s(total_words, cfg):
+    """The finished runtime a script of this many words should come to, pauses included."""
+    per_word, fixed_s = _runtime_model(cfg)
+    return total_words * per_word + fixed_s
+
+
+def pause_share(cfg):
+    """Fraction of the finished runtime that is silence, for the log line."""
+    budget = word_budget(cfg)
+    return 1 - (budget * 60 / int(cfg["words_per_minute"])) / (int(cfg["target_duration_min"]) * 60)
 
 
 def ordered_words(actual_target):
@@ -564,16 +618,14 @@ def run(video_id, cfg):
         log.warning("no concept.json, working from the topic in the database: %s", topic)
 
     lesson_count = int(cfg.get("lessons_per_video", 10))
-    # words_per_minute is a measured speaking rate (see scripts/calibrate_tempo.py),
-    # not counting the silence our own pause system adds between sentences, scenes
-    # and lessons. PAUSE_RESERVE_RATIO of the runtime goes to that silence, so the
-    # word budget is shrunk by the same fraction to still land in target_duration_min.
-    raw_budget = int(cfg["target_duration_min"]) * int(cfg["words_per_minute"])
-    budget = round(raw_budget * (1 - PAUSE_RESERVE_RATIO))
+    # words_per_minute is a measured speaking rate (see scripts/calibrate_tempo.py) with
+    # no pauses in it; word_budget() adds the silence our own pause system puts between
+    # sentences, scenes and lessons, so the finished runtime lands on target_duration_min.
+    budget = word_budget(cfg)
     per_lesson = max(200, round((budget - HOOK_WORDS - OUTRO_WORDS) / lesson_count))
-    log.info("word budget %d (%d wpm minus %.0f%% for pauses; ~%d per lesson wanted, "
-             "ordering %d)", budget, cfg["words_per_minute"], PAUSE_RESERVE_RATIO * 100,
-             per_lesson, ordered_words(per_lesson))
+    log.info("word budget %d (%d wpm speaking, %.1f%% of the runtime is pauses; ~%d per "
+             "lesson wanted, ordering %d)", budget, cfg["words_per_minute"],
+             pause_share(cfg) * 100, per_lesson, ordered_words(per_lesson))
 
     seen = db.recent_tics(TICS_FROM_VIDEOS)
     tics = forbidden_tics_rule(seen.get("name", []), seen.get("colour", []))
@@ -674,7 +726,7 @@ def run(video_id, cfg):
         db.add_scene(video_id, i, text=scene, image_prompt=prompt,
                      duration_s=round(txt.word_count(scene) * seconds_per_word, 2))
 
-    estimated_s = round(total_words * seconds_per_word, 1)
+    estimated_s = round(estimated_runtime_s(total_words, cfg), 1)
     db.update_video(video_id, title=outline["title"])
     db.add_tics(video_id, collect_tics(full_text))
 

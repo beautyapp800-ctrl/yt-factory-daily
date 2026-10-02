@@ -96,13 +96,28 @@ def _unwrap_json_prompt(text):
     return match.group(1) if match else text
 
 
+def _split_style(prompt, cfg):
+    """(scene part, style suffix) of a stored image prompt. The script stage stores
+    '<what the scene shows>, <config image_style>'; only the first part is the LLM's to
+    answer for. The style carries its own 'no text, no lettering, no watermark', which
+    would trip the banned-word check on every single prompt if it were scanned too -
+    caught live on video 7: all 43 prompts flagged, every one queued for an LLM rewrite
+    that would then have dropped the style off the end."""
+    suffix = f", {cfg.get('image_style') or ''}"
+    if len(suffix) > 2 and prompt.endswith(suffix):
+        return prompt[:-len(suffix)], suffix
+    return prompt, ""
+
+
 def _fix_prompt_if_needed(scene, cfg):
-    """Rewrite scene['image_prompt'] in place (db + the in-memory dict) if it names
-    a banned noun. Returns the (possibly unchanged) prompt text."""
-    prompt = scene["image_prompt"] or ""
+    """Rewrite scene['image_prompt'] in place (db + the in-memory dict) if its scene part
+    names a banned word. The style suffix is set aside while that happens and put back
+    after. Returns the (possibly unchanged) full prompt text."""
+    full = scene["image_prompt"] or ""
+    prompt, suffix = _split_style(full, cfg)
     hits = find_banned_image_words(prompt)
     if not hits:
-        return prompt
+        return full
 
     for attempt in range(1, PROMPT_FIX_ATTEMPTS + 1):
         log.warning("scene %d image_prompt names %s, rewriting (attempt %d/%d)",
@@ -117,17 +132,17 @@ def _fix_prompt_if_needed(scene, cfg):
         hits = find_banned_image_words(fixed)
         if fixed and not hits:
             log.info("scene %d image_prompt fixed: %s", scene["idx"], fixed[:80])
-            db.update_scene(scene["id"], image_prompt=fixed)
-            scene["image_prompt"] = fixed
-            return fixed
+            db.update_scene(scene["id"], image_prompt=fixed + suffix)
+            scene["image_prompt"] = fixed + suffix
+            return fixed + suffix
         prompt = fixed or prompt
 
     log.warning("scene %d image_prompt still names %s after %d attempts, using as-is",
                scene["idx"], hits, PROMPT_FIX_ATTEMPTS)
-    if prompt != scene["image_prompt"]:
-        db.update_scene(scene["id"], image_prompt=prompt)
-        scene["image_prompt"] = prompt
-    return prompt
+    if prompt + suffix != scene["image_prompt"]:
+        db.update_scene(scene["id"], image_prompt=prompt + suffix)
+        scene["image_prompt"] = prompt + suffix
+    return prompt + suffix
 
 
 def run(video_id, cfg):

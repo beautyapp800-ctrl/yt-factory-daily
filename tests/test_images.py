@@ -348,6 +348,57 @@ def test_clean_prompt_skips_the_llm(tmp):
     check(llm_calls["n"] == 0, "a prompt with no banned nouns never calls the LLM")
 
 
+STYLE = "cinematic painterly illustration, no text, no lettering, no watermark"
+
+
+def test_style_suffix_is_not_scanned_for_banned_words(tmp):
+    print("test_style_suffix_is_not_scanned_for_banned_words")
+    # Caught live on video 7: image_style carries "no lettering", and "lettering" is a
+    # banned word, so every one of 43 perfectly good prompts was flagged for rewriting.
+    vid = _setup_video(tmp, "stylescan", [24],
+                       prompts=[f"Hands holding a plain unmarked parcel, {STYLE}"])
+    llm_calls = {"n": 0}
+
+    def fake_cf(prompt, out_path, seed, cfg):
+        Path(out_path).write_bytes(b"\xff\xd8\xff" + b"\x00" * 50)
+        return out_path, 96.0
+
+    def fake_llm(prompt, **kw):
+        llm_calls["n"] += 1
+        return "should not be called"
+
+    original = _stub(cloudflare=fake_cf, llm_complete=fake_llm)
+    try:
+        stage.run(vid, {"image_style": STYLE,
+                        "images": {"provider": "cloudflare", "images_per_seconds": 12}})
+    finally:
+        _restore(original)
+    check(llm_calls["n"] == 0, "a clean prompt is not sent for a rewrite because of its own style")
+
+
+def test_fixed_prompt_keeps_its_style_suffix(tmp):
+    print("test_fixed_prompt_keeps_its_style_suffix")
+    vid = _setup_video(tmp, "stylekeep", [24],
+                       prompts=[f"A courier hands over a gift box with a label, {STYLE}"])
+    seen = []
+
+    def fake_cf(prompt, out_path, seed, cfg):
+        seen.append(prompt)
+        Path(out_path).write_bytes(b"\xff\xd8\xff" + b"\x00" * 50)
+        return out_path, 96.0
+
+    original = _stub(cloudflare=fake_cf, llm_complete=lambda prompt, **kw: "Hands holding a plain unmarked parcel")
+    try:
+        stage.run(vid, {"image_style": STYLE,
+                        "images": {"provider": "cloudflare", "images_per_seconds": 12}})
+    finally:
+        _restore(original)
+    stored = db.get_scenes(vid)[0]["image_prompt"]
+    check(stored == f"Hands holding a plain unmarked parcel, {STYLE}",
+          f"the rewrite got the style put back ({stored})")
+    check(all(p == stored for p in seen), "the provider was sent the full prompt, style included")
+
+
 def test_ocr_triggers_one_regeneration(tmp):
     print("test_ocr_triggers_one_regeneration")
     vid = _setup_video(tmp, "ocr", [24])   # 2 images
@@ -414,6 +465,8 @@ if __name__ == "__main__":
         test_no_scenes_raises(tmp)
         test_banned_prompt_is_fixed_before_generation(tmp)
         test_clean_prompt_skips_the_llm(tmp)
+        test_style_suffix_is_not_scanned_for_banned_words(tmp)
+        test_fixed_prompt_keeps_its_style_suffix(tmp)
         test_ocr_triggers_one_regeneration(tmp)
         test_ocr_gives_up_after_one_retry(tmp)
     print("ALL IMAGES TESTS PASSED")
