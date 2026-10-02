@@ -14,7 +14,7 @@ service_account.json
 # anywhere. For CI it goes in a GitHub Secret (YOUTUBE_TOKEN_JSON).
 secrets/
 token.json
-credentials.json
+credentials*.json
 client_secret*.json
 
 # Generated per-video output: scripts, audio, images, clips, the finished video.

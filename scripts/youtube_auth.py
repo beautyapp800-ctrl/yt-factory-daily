@@ -40,7 +40,8 @@ def main():
           "press Allow.\nIf Google says it has not verified the app, that is expected for "
           "your own project: Advanced -> Go to the app.\n")
     creds = flow.run_local_server(port=0, access_type="offline", prompt="consent",
-                                  authorization_prompt_message="",
+                                  authorization_prompt_message="If the browser did not open, "
+                                                    "copy this link into it:\n{url}\n",
                                   success_message="Done - you can close this tab and go "
                                                   "back to the terminal.")
 

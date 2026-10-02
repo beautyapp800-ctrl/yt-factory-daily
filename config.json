@@ -5,7 +5,7 @@
   "videos_per_week": 7,
   "publish_time": "10:00",
   "timezone": "Europe/Kiev",
-  "youtube_publish": false,
+  "youtube_publish": true,
   "privacy_status": "private",
   "aspect": "16:9",
   "voice": "en_US-ryan-high",
