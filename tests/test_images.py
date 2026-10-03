@@ -65,7 +65,7 @@ def _stub(cloudflare=None, pollinations=None, available=True, ocr_result=(0, 0),
     if pollinations is not None:
         images.synthesize_pollinations = pollinations
     images.cloudflare_available = lambda: available
-    ocr.detect_text = lambda path, min_confidence=60: ocr_result
+    ocr.detect_text = lambda path, **kw: ocr_result
     stage.complete = llm_complete or (lambda prompt, **kw: "a plain rewritten scene")
     return original
 
@@ -421,9 +421,46 @@ def test_total_neurons_are_counted_across_all_calls(tmp):
           f"4 images at 96 each are reported as 384 in the events table ({messages})")
 
 
-def test_ocr_triggers_one_regeneration(tmp):
-    print("test_ocr_triggers_one_regeneration")
+def _write_real_jpeg(path, seed=0):
+    """A valid small JPEG. The resume tests need one: an image is only reused if it opens."""
+    from PIL import Image
+    Image.new("RGB", (64, 36), (seed % 255, 40, 80)).save(path, "JPEG")
+
+
+def test_lettering_is_redrawn_with_a_different_seed(tmp):
+    print("test_lettering_is_redrawn_with_a_different_seed")
     vid = _setup_video(tmp, "ocr", [24])   # 2 images
+    seeds = []
+
+    def fake_cf(prompt, out_path, seed, cfg):
+        seeds.append(seed)
+        Path(out_path).write_bytes(b"\xff\xd8\xff" + str(len(seeds)).encode())
+        return out_path, 96.0
+
+    # Every first draw "has lettering", every redraw does not.
+    reads = {"n": 0}
+
+    def fake_ocr(path, **kw):
+        reads["n"] += 1
+        return (20, 90) if reads["n"] % 2 == 1 else (0, 0)
+
+    original = _stub(cloudflare=fake_cf, ocr_result=None)
+    ocr.detect_text = fake_ocr
+    try:
+        stage.run(vid, {"images": {"provider": "cloudflare", "images_per_seconds": 12}})
+    finally:
+        _restore(original)
+
+    check(len(seeds) == 4, f"each of the 2 images was drawn, then drawn again ({len(seeds)})")
+    check(seeds[1] != seeds[0] and seeds[3] != seeds[2],
+          f"the redraw uses a different seed, so a provider that honours it draws something "
+          f"else rather than the same frame ({seeds})")
+    check(len(db.get_video_images(vid)) == 2, "the redraw replaces the slot, it does not add one")
+
+
+def test_lettering_gives_up_after_three_attempts(tmp):
+    print("test_lettering_gives_up_after_three_attempts")
+    vid = _setup_video(tmp, "ocrfail", [24])
     calls = {"n": 0}
 
     def fake_cf(prompt, out_path, seed, cfg):
@@ -431,45 +468,90 @@ def test_ocr_triggers_one_regeneration(tmp):
         Path(out_path).write_bytes(b"\xff\xd8\xff" + str(calls["n"]).encode())
         return out_path, 96.0
 
-    # First call for each image "has text" (simulated), the regeneration "doesn't".
-    ocr_calls = {"n": 0}
-
-    def fake_ocr(path, min_confidence=60):
-        ocr_calls["n"] += 1
-        return (20, 90) if ocr_calls["n"] % 2 == 1 else (0, 0)
-
-    original = _stub(cloudflare=fake_cf, ocr_result=None)
-    ocr.detect_text = fake_ocr
+    original = _stub(cloudflare=fake_cf, ocr_result=(25, 90))      # never clean
     try:
-        cfg = {"images": {"provider": "cloudflare", "images_per_seconds": 12}}
-        stage.run(vid, cfg)
+        stage.run(vid, {"images": {"provider": "cloudflare", "images_per_seconds": 12}})
     finally:
         _restore(original)
 
-    check(calls["n"] == 4, f"each of 2 images was generated, then regenerated once ({calls['n']})")
-    rows = db.get_video_images(vid)
-    check(len(rows) == 2, "regeneration replaces the same slot, not an extra row")
+    check(calls["n"] == 2 * stage.TEXT_ATTEMPTS,
+          f"2 images x {stage.TEXT_ATTEMPTS} attempts and then it stops, rather than "
+          f"spending the whole allowance on one frame ({calls['n']})")
+    check(len(db.get_video_images(vid)) == 2, "the images are kept anyway, lettering and all")
+    import sqlite3
+    from contextlib import closing
+    with closing(sqlite3.connect(db.DB_PATH)) as conn:
+        warnings = [r[0] for r in conn.execute(
+            "SELECT message FROM events WHERE video_id = ? AND level = 'warning'", (vid,))]
+    check(any("still shows lettering" in w for w in warnings),
+          f"and it says so in the events table ({warnings[:2]})")
 
 
-def test_ocr_gives_up_after_one_retry(tmp):
-    print("test_ocr_gives_up_after_one_retry")
-    vid = _setup_video(tmp, "ocrstuck", [24])
-    vid_scenes = db.get_scenes(vid)[:1]   # only exercise scene 1's first image really
-    calls = {"n": 0}
+def test_images_from_an_earlier_run_are_not_paid_for_again(tmp):
+    print("test_images_from_an_earlier_run_are_not_paid_for_again")
+    # The point of the whole thing: a run that died at the render must not spend another
+    # 6720 Neurons on pictures it already has. On a 10,000 a day allowance it could not.
+    vid = _setup_video(tmp, "resume", [24, 24])
+    drawn = {"n": 0}
 
     def fake_cf(prompt, out_path, seed, cfg):
-        calls["n"] += 1
-        Path(out_path).write_bytes(b"\xff\xd8\xff")
+        drawn["n"] += 1
+        _write_real_jpeg(out_path, drawn["n"])
         return out_path, 96.0
 
-    original = _stub(cloudflare=fake_cf, ocr_result=(20, 95))   # always "finds text"
+    original = _stub(cloudflare=fake_cf, ocr_result=(0, 0))
     try:
-        cfg = {"images": {"provider": "cloudflare", "images_per_seconds": 24}}  # 1 image
-        check(stage.run(vid, cfg) is True,
-              "a persistently flagged image is kept after one retry, not looped forever")
+        stage.run(vid, {"images": {"provider": "cloudflare", "images_per_seconds": 12}})
+        first = drawn["n"]
+        paths = [r["path"] for r in db.get_video_images(vid)]
+        stage.run(vid, {"images": {"provider": "cloudflare", "images_per_seconds": 12}})
     finally:
         _restore(original)
-    check(calls["n"] == 2, f"generated once, regenerated once, then stopped ({calls['n']})")
+
+    check(first == 4, f"the first run drew all 4 images ({first})")
+    check(drawn["n"] == first, f"the second drew none of them ({drawn['n'] - first} redrawn)")
+    rows = db.get_video_images(vid)
+    check([r["path"] for r in rows] == paths, "the same files are still the video's images")
+    check({r["provider"] for r in rows} == {"cloudflare"},
+          "the row still records how the picture was really made, not that this run reused it")
+    import sqlite3
+    from contextlib import closing
+    with closing(sqlite3.connect(db.DB_PATH)) as conn:
+        messages = [r[0] for r in conn.execute(
+            "SELECT message FROM events WHERE video_id = ? AND stage = 'images'", (vid,))]
+    check(any("4 reused" in m for m in messages),
+          f"and the run says how many it reused ({messages[-1][:80]})")
+
+
+def test_a_reused_image_with_lettering_is_still_redrawn(tmp):
+    print("test_a_reused_image_with_lettering_is_still_redrawn")
+    # Resuming must not preserve a bad frame forever: the check runs on what is already
+    # there too, which is also how the flagged images of an earlier video get fixed.
+    vid = _setup_video(tmp, "resumebad", [24])
+    drawn = {"n": 0}
+
+    def fake_cf(prompt, out_path, seed, cfg):
+        drawn["n"] += 1
+        _write_real_jpeg(out_path, drawn["n"])
+        return out_path, 96.0
+
+    original = _stub(cloudflare=fake_cf, ocr_result=(0, 0))
+    try:
+        stage.run(vid, {"images": {"provider": "cloudflare", "images_per_seconds": 12}})
+        before = drawn["n"]
+        # now the files on disk read as having lettering on the first look, clean after
+        reads = {"n": 0}
+
+        def fake_ocr(path, **kw):
+            reads["n"] += 1
+            return (20, 90) if reads["n"] % 2 == 1 else (0, 0)
+        ocr.detect_text = fake_ocr
+        stage.run(vid, {"images": {"provider": "cloudflare", "images_per_seconds": 12}})
+    finally:
+        _restore(original)
+    check(drawn["n"] > before,
+          f"a frame already on disk that reads as having lettering is drawn again "
+          f"({drawn['n'] - before} redraws)")
 
 
 if __name__ == "__main__":
@@ -490,6 +572,8 @@ if __name__ == "__main__":
         test_style_suffix_is_not_scanned_for_banned_words(tmp)
         test_fixed_prompt_keeps_its_style_suffix(tmp)
         test_total_neurons_are_counted_across_all_calls(tmp)
-        test_ocr_triggers_one_regeneration(tmp)
-        test_ocr_gives_up_after_one_retry(tmp)
+        test_lettering_is_redrawn_with_a_different_seed(tmp)
+        test_lettering_gives_up_after_three_attempts(tmp)
+        test_images_from_an_earlier_run_are_not_paid_for_again(tmp)
+        test_a_reused_image_with_lettering_is_still_redrawn(tmp)
     print("ALL IMAGES TESTS PASSED")

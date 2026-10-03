@@ -36,8 +36,9 @@ import json
 import random
 import socket
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from core import db
 from core.config import output_dir
@@ -50,6 +51,9 @@ MADE_FOR_KIDS = False
 CONTAINS_SYNTHETIC_MEDIA = True
 
 CATEGORY_ID = "22"               # People & Blogs
+DEFAULT_PUBLISH_TIME = "21:00"   # local, config.publish_time
+DEFAULT_PUBLISH_TIMEZONE = "Europe/Kiev"
+DEFAULT_DAYS_AHEAD = 3
 DEFAULT_LANGUAGE = "en"
 PRIVACY = ("private", "unlisted", "public")
 DEFAULT_CHUNK_MB = 8             # must be a multiple of 256 KiB; 8 MiB is
@@ -74,7 +78,30 @@ class UploadError(Exception):
 
 # --- what is sent ----------------------------------------------------------------
 
-def build_body(video, cfg):
+def publish_at(cfg, now=None):
+    """When YouTube should make this video public, as RFC 3339 UTC.
+
+    config.publish_time local time, config.publish_days_ahead days from now. The queue of
+    finished videos lives on YouTube rather than on disk, because the runner is disposable
+    and seven 300 MB files cannot be carried between runs; scheduling three days out means
+    three days of failed runs change nothing a viewer sees.
+
+    The conversion is done through the real zone, not a fixed offset: Kyiv is UTC+3 in
+    summer and UTC+2 in winter, so 21:00 local is 18:00Z for part of the year and 19:00Z for
+    the rest, and an offset written down once would be wrong for half of it.
+    """
+    zone = ZoneInfo(cfg.get("timezone") or DEFAULT_PUBLISH_TIMEZONE)
+    hour, _, minute = (cfg.get("publish_time") or DEFAULT_PUBLISH_TIME).partition(":")
+    days = int(cfg.get("publish_days_ahead", DEFAULT_DAYS_AHEAD))
+    local = (now or datetime.now(timezone.utc)).astimezone(zone)
+    when = (local + timedelta(days=days)).replace(hour=int(hour), minute=int(minute or 0),
+                                                  second=0, microsecond=0)
+    if when <= local:
+        when += timedelta(days=1)
+    return when.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def build_body(video, cfg, now=None):
     """The videos.insert request body for this video."""
     privacy = cfg.get("privacy_status", "private")
     if privacy not in PRIVACY:
@@ -82,6 +109,17 @@ def build_body(video, cfg):
     yt = cfg.get("youtube") or {}
     tags = video.get("tags")
     tags = json.loads(tags) if isinstance(tags, str) and tags else (tags or [])
+    status = {
+        "privacyStatus": privacy,
+        "selfDeclaredMadeForKids": MADE_FOR_KIDS,
+        "containsSyntheticMedia": CONTAINS_SYNTHETIC_MEDIA,
+    }
+    if cfg.get("schedule_publish", True):
+        # YouTube requires a scheduled video to go up private; it makes it public itself at
+        # publishAt. Asking for public AND a schedule is rejected, so privacy is forced here
+        # rather than left to trip the upload.
+        status["privacyStatus"] = "private"
+        status["publishAt"] = publish_at(cfg, now)
     return {
         "snippet": {
             "title": video.get("seo_title") or video.get("title") or "",
@@ -90,11 +128,7 @@ def build_body(video, cfg):
             "categoryId": str(yt.get("category_id", CATEGORY_ID)),
             "defaultLanguage": yt.get("default_language", DEFAULT_LANGUAGE),
         },
-        "status": {
-            "privacyStatus": privacy,
-            "selfDeclaredMadeForKids": MADE_FOR_KIDS,
-            "containsSyntheticMedia": CONTAINS_SYNTHETIC_MEDIA,
-        },
+        "status": status,
     }
 
 
@@ -336,9 +370,11 @@ def run(video_id, cfg, service=None, sleep=time.sleep):
 
     out = output_dir(video_id)
     privacy = body["status"]["privacyStatus"]
+    scheduled = body["status"].get("publishAt")
     size_mb = Path(media_path).stat().st_size / 1e6
-    log.info("uploading %s (%.0f MB) as %r, privacy %s", Path(media_path).name, size_mb,
-             body["snippet"]["title"], privacy)
+    log.info("uploading %s (%.0f MB) as %r, privacy %s%s", Path(media_path).name, size_mb,
+             body["snippet"]["title"], privacy,
+             f", going public at {scheduled}" if scheduled else "")
 
     chunk_mb = int((cfg.get("youtube") or {}).get("chunk_mb", DEFAULT_CHUNK_MB))
     response, stats = upload_video(service, body, media_path, out / "upload_session.json",
@@ -368,20 +404,31 @@ def run(video_id, cfg, service=None, sleep=time.sleep):
     else:
         log.warning("no thumbnail file to set")
 
+    returned_schedule = (response.get("status") or {}).get("publishAt")
+    if scheduled and not returned_schedule:
+        msg = ("YouTube did not echo publishAt, so the video may not be scheduled; an "
+               "unaudited API project cannot schedule, and the video will sit private "
+               "until it is published by hand")
+        log.warning(msg)
+        db.log_event(video_id, "upload", "warning", msg)
+
     db.update_video(video_id, status="published",
-                    published_at=datetime.now(timezone.utc).isoformat(timespec="seconds"))
+                    published_at=returned_schedule or scheduled
+                    or datetime.now(timezone.utc).isoformat(timespec="seconds"))
 
     spent = {"videos.insert": stats["insert_calls"], "thumbnails.set": thumb_calls}
     log.info("quota: requests that cost quota this run %s. %s", spent, QUOTA_NOTE)
     (out / "upload.json").write_text(json.dumps({
         "youtube_id": youtube_id, "privacy_requested": privacy,
         "privacy_returned": (response.get("status") or {}).get("privacyStatus"),
+        "publish_at_requested": scheduled, "publish_at_returned": returned_schedule,
         "bytes": stats["bytes"], "seconds": stats.get("seconds"), "chunks": stats["chunks"],
         "retries": stats["retries"], "resumed_from": stats["resumed_from"],
         "quota_costing_requests": spent, "quota_note": QUOTA_NOTE}, indent=2), encoding="utf-8")
     db.log_event(video_id, "upload", "info",
-                 f"https://youtu.be/{youtube_id}, privacy {privacy}, {size_mb:.0f} MB, "
-                 f"{stats['retries']} retries; quota requests {spent}")
+                 f"https://youtu.be/{youtube_id}, privacy {privacy}, "
+                 f"{'public at ' + scheduled if scheduled else 'no schedule'}, "
+                 f"{size_mb:.0f} MB, {stats['retries']} retries; quota requests {spent}")
     return True
 
 

@@ -5,7 +5,7 @@ from datetime import datetime
 from core import db
 from core.config import ConfigError, load_config
 from core.logger import get_logger
-from pipeline import images, render, script, seo, thumbnail, topic, tts
+from pipeline import images, render, script, seo, thumbnail, topic, tts, upload
 
 log = get_logger("run")
 
@@ -20,15 +20,26 @@ STAGES = [
     # which is the seo stage's output, not the script's working title.
     ("seo", seo, "seo"),
     ("thumbnail", thumbnail, "thumbnail"),
-    # No upload here on purpose. Production ends at status `ready`; publication is a separate
-    # process on its own schedule (publish.py), so a slow or failed render can never make
-    # a publishing day late. See README, "виробництво окремо від публікації".
+    # Upload belongs here now. The queue of finished videos lives on YouTube rather than on
+    # disk: each video goes up scheduled for config.publish_days_ahead days ahead, so the
+    # separation the README asks for is still there - a run that fails today changes nothing
+    # a viewer sees for three days - without carrying 300 MB files between disposable
+    # runners. publish.py remains for uploading a video by hand.
+    ("upload", upload, "uploading"),
 ]
+
+MAX_ATTEMPTS = 3        # tries at one video before it is left alone and a new one started
 
 
 def process_video(video_id, cfg):
     """Run all stages for one video. Never raises: failures are recorded as status=failed."""
+    done = db.finished_stages(video_id)
+    if done:
+        log.info("resuming video %s: %s already finished", video_id,
+                 ", ".join(n for n, _, _ in STAGES if n in done))
     for name, module, status in STAGES:
+        if name in done:
+            continue
         try:
             db.update_video(video_id, status=status)
             db.log_event(video_id, name, "info", "stage started")
@@ -67,10 +78,26 @@ def main():
         return 0
 
     db.init_db()
-    placeholder = f"Placeholder topic {datetime.now():%Y-%m-%d %H:%M:%S}"
-    video_id = db.create_video(placeholder)
-    log.info("created video id=%s", video_id)
-    return 0 if process_video(video_id, cfg) else 1
+    existing = db.oldest_unfinished(MAX_ATTEMPTS)
+    if existing:
+        video_id = existing["id"]
+        attempts = (existing.get("attempts") or 0) + 1
+        log.info("carrying on with video %s (attempt %d of %d), status %s", video_id,
+                 attempts, MAX_ATTEMPTS, existing["status"])
+    else:
+        placeholder = f"Placeholder topic {datetime.now():%Y-%m-%d %H:%M:%S}"
+        video_id = db.create_video(placeholder)
+        attempts = 1
+        log.info("created video id=%s", video_id)
+    db.update_video(video_id, attempts=attempts)
+
+    ok = process_video(video_id, cfg)
+    if not ok and attempts >= MAX_ATTEMPTS:
+        log.error("video %s has now failed %d times and will not be retried; the next run "
+                  "will start a new one", video_id, attempts)
+        db.log_event(video_id, "run", "error",
+                     f"abandoned after {attempts} attempts")
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":

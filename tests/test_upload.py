@@ -118,7 +118,12 @@ class FakeService:
 OK_RESPONSE = {"id": "abc123XYZ", "status": {"privacyStatus": "private",
                                              "selfDeclaredMadeForKids": False,
                                              "containsSyntheticMedia": True}}
-CFG = {"privacy_status": "private", "youtube": {"chunk_mb": 8}}
+# schedule_publish off by default in the tests: most of them are about the upload itself,
+# and a publishAt would put a moving timestamp in every comparison. The scheduling tests
+# turn it on explicitly.
+CFG = {"privacy_status": "private", "schedule_publish": False, "youtube": {"chunk_mb": 8}}
+SCHEDULED = {**CFG, "schedule_publish": True, "publish_time": "21:00",
+             "timezone": "Europe/Kiev", "publish_days_ahead": 3}
 
 
 def _video(tmp, name="v", **over):
@@ -164,8 +169,9 @@ def test_body_has_what_was_asked_for(tmp):
           "description and tags come from the database (tags decoded from JSON)")
     check(s["categoryId"] == "22" and s["defaultLanguage"] == "en", "category 22, language en")
     check(st["privacyStatus"] == "private", "privacy comes from config.privacy_status")
-    check(up.build_body(_video(tmp), {"privacy_status": "unlisted"})["status"]["privacyStatus"] == "unlisted",
-          "and changes with that one line")
+    check(up.build_body(_video(tmp), {"privacy_status": "unlisted",
+                                      "schedule_publish": False})["status"]["privacyStatus"]
+          == "unlisted", "and changes with that one line")
     check(up.build_body(_video(tmp, seo_title=None), CFG)["snippet"]["title"] == "working",
           "with no seo title it falls back to the working title")
     try:
@@ -173,6 +179,33 @@ def test_body_has_what_was_asked_for(tmp):
         check(False, "a nonsense privacy value should raise")
     except up.UploadError:
         check(True, "a nonsense privacy value raises instead of reaching YouTube")
+
+
+def test_a_scheduled_video_goes_up_private_for_the_right_moment(tmp):
+    print("test_a_scheduled_video_goes_up_private_for_the_right_moment")
+    from datetime import datetime, timezone as tz
+    summer = up.publish_at(SCHEDULED, datetime(2026, 10, 3, 19, 0, tzinfo=tz.utc))
+    winter = up.publish_at(SCHEDULED, datetime(2026, 1, 15, 10, 0, tzinfo=tz.utc))
+    check(summer == "2026-10-06T18:00:00Z", f"three days ahead, 21:00 Kyiv in summer ({summer})")
+    check(winter == "2026-01-18T19:00:00Z",
+          f"and in winter, when Kyiv is an hour further from UTC ({winter}) - the same 21:00 "
+          f"local either way, which a fixed offset would get wrong for half the year")
+
+    late = up.publish_at(SCHEDULED, datetime(2026, 10, 3, 19, 30, tzinfo=tz.utc))
+    check(late == "2026-10-06T18:00:00Z",
+          f"running after 21:00 local still schedules three days out ({late})")
+
+    status = up.build_body(_video(tmp), SCHEDULED,
+                           datetime(2026, 10, 3, 19, 0, tzinfo=tz.utc))["status"]
+    check(status["publishAt"] == summer, "the request carries the moment")
+    check(status["privacyStatus"] == "private",
+          "and goes up private, which is what YouTube requires of a scheduled video")
+    public = up.build_body(_video(tmp), {**SCHEDULED, "privacy_status": "public"},
+                           datetime(2026, 10, 3, 19, 0, tzinfo=tz.utc))["status"]
+    check(public["privacyStatus"] == "private",
+          "asking for public AND a schedule would be rejected, so private wins here")
+    check("publishAt" not in up.build_body(_video(tmp), CFG)["status"],
+          "with scheduling off there is no publishAt at all")
 
 
 def test_the_two_flags_cannot_be_switched_off(tmp):
@@ -507,6 +540,7 @@ if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
         test_body_has_what_was_asked_for(tmp)
+        test_a_scheduled_video_goes_up_private_for_the_right_moment(tmp)
         test_the_two_flags_cannot_be_switched_off(tmp)
         test_metadata_problems_are_found_before_uploading(tmp)
         test_retries_resume_and_succeed(tmp)

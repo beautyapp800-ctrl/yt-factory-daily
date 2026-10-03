@@ -13,14 +13,21 @@ Picking a fixed -26 dB gain instead would leave a quiet track inaudible and a lo
 competing with the narration.
 
 Seams. A three minute track under a thirty minute video is looped ten times, and a plain cut
-back to the start clicks, because the waveform jumps. Each repeat is therefore crossfaded
-into the next (acrossfade), which is continuous by construction - there is no sample-level
-discontinuity to click.
+back to the start clicks, because the waveform jumps. So the track is first turned into a
+block that loops perfectly: its last few seconds are crossfaded onto its first few, which
+makes the block's end and its start the same material, already faded into each other. That
+block is then simply repeated. The join is continuous by construction - there is no
+sample-level discontinuity to click - and it is built once rather than once per repeat.
+
+The first version crossfaded N copies of the track in a single filter graph, which decoded
+the file N times. It worked and it was slow: 309s for a 25 minute bed on an idle machine,
+and over 1800s - the timeout, which killed the render - while a render was using the CPU.
 
 Length. The bed is built to the voice track's own duration, then faded in and out, so it can
 be mixed with duration=first and never truncate or extend the video.
 """
 import json
+import math
 import re
 import subprocess
 from pathlib import Path
@@ -68,12 +75,40 @@ def pick_track(video_id, tracks):
     return tracks[int(video_id) % len(tracks)]
 
 
-def _ffmpeg(args, context, timeout=1800):
-    result = subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-stats"] + args,
-                            capture_output=True, text=True, timeout=timeout)
+def _ffmpeg(args, context, timeout=900):
+    try:
+        result = subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-stats"] + args,
+                                capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as e:
+        # A MusicError, not a crash: the caller drops the music and renders the video.
+        raise MusicError(f"{context}: gave up after {timeout}s") from e
     if result.returncode != 0:
         raise MusicError(f"{context}: {result.stderr.strip()[-400:]}")
     return result
+
+
+def seamless_block(track, out_path, crossfade):
+    """A block of `track` that can be repeated end to end without a click.
+
+    The last `crossfade` seconds are mixed onto the first `crossfade` seconds and that
+    becomes the block's head, followed by the untouched middle. The block therefore ends
+    where its own head begins, through material that is already faded, so repeating it is
+    continuous. Length is the track's length minus one crossfade.
+    """
+    length = duration(track)
+    if length <= 3 * crossfade:
+        raise MusicError(f"{Path(track).name} is only {length:.0f}s, too short to loop with "
+                         f"a {crossfade:.0f}s crossfade")
+    head_and_tail = (f"[0:a]atrim=start={length - crossfade:.3f},asetpts=N/SR/TB[tail];"
+                     f"[1:a]atrim=0:{crossfade:.3f},asetpts=N/SR/TB[head];"
+                     f"[tail][head]acrossfade=d={crossfade:.3f}:c1=tri:c2=tri[join];"
+                     f"[2:a]atrim={crossfade:.3f}:{length - crossfade:.3f},asetpts=N/SR/TB[body];"
+                     f"[join][body]concat=n=2:v=0:a=1[out]")
+    _ffmpeg(["-i", str(track), "-i", str(track), "-i", str(track),
+             "-filter_complex", head_and_tail, "-map", "[out]",
+             "-ac", "1", "-ar", "48000", "-c:a", "pcm_s16le", str(out_path)],
+            f"ffmpeg could not build a seamless loop of {Path(track).name}")
+    return out_path
 
 
 def duration(path):
@@ -97,7 +132,7 @@ def loudness(path):
     return float(matches[-1])
 
 
-def build_bed(track, seconds, out_path, cfg, voice_lufs):
+def build_bed(track, seconds, out_path, cfg, voice_lufs, keep_block=False):
     """A music bed of exactly `seconds`, looped seamlessly, faded, and sitting
     gain_below_voice_db under `voice_lufs`. Returns (path, details)."""
     s = settings(cfg)
@@ -106,33 +141,30 @@ def build_bed(track, seconds, out_path, cfg, voice_lufs):
 
     track_s = duration(track)
     crossfade = min(s["loop_crossfade_s"], max(0.5, track_s / 4))
-    # Each repeat overlaps the one before by `crossfade`, so n copies last
-    # n*track_s - (n-1)*crossfade. Solve for the smallest n that covers the video.
-    copies = 1
-    if track_s - crossfade > 0:
-        while copies * track_s - (copies - 1) * crossfade < seconds:
-            copies += 1
+    block = out_path.with_name(out_path.stem + "_loop.wav")
+    seamless_block(track, block, crossfade)
+    block_s = duration(block)
+    copies = max(1, math.ceil(seconds / block_s))
 
     target_lufs = voice_lufs - s["gain_below_voice_db"]
-    gain_db = target_lufs - loudness(track)
-
-    inputs = []
-    for _ in range(copies):
-        inputs += ["-i", str(track)]
-    steps, label = [], "0:a"
-    for i in range(1, copies):
-        nxt = f"x{i}"
-        steps.append(f"[{label}][{i}:a]acrossfade=d={crossfade}:c1=tri:c2=tri[{nxt}]")
-        label = nxt
+    # Measured on the loop block, not the source track: the block already contains the
+    # crossfade, and summing two uncorrelated signals at half amplitude there costs about
+    # 3 dB that the track on its own cannot predict. It is also 96 seconds to scan instead
+    # of 25 minutes, and the bed is only this block repeated, so the two have the same
+    # loudness.
+    gain_db = target_lufs - loudness(block)
     fade_out_at = max(0.0, seconds - s["fade_out_s"])
-    steps.append(f"[{label}]volume={gain_db:.2f}dB,"
-                 f"afade=t=in:st=0:d={s['fade_in_s']},"
-                 f"afade=t=out:st={fade_out_at:.3f}:d={s['fade_out_s']},"
-                 f"atrim=0:{seconds:.3f},asetpts=N/SR/TB[bed]")
-
-    _ffmpeg(inputs + ["-filter_complex", ";".join(steps), "-map", "[bed]",
-                      "-ac", "1", "-ar", "48000", "-b:a", "192k", str(out_path)],
-            f"ffmpeg could not build a music bed from {Path(track).name}")
+    try:
+        _ffmpeg(["-stream_loop", str(copies - 1), "-i", str(block),
+                 "-af", (f"volume={gain_db:.2f}dB,"
+                         f"afade=t=in:st=0:d={s['fade_in_s']},"
+                         f"afade=t=out:st={fade_out_at:.3f}:d={s['fade_out_s']},"
+                         f"atrim=0:{seconds:.3f}"),
+                 "-ac", "1", "-ar", "48000", "-b:a", "192k", str(out_path)],
+                f"ffmpeg could not build a music bed from {Path(track).name}")
+    finally:
+        if not keep_block:
+            block.unlink(missing_ok=True)
 
     # Measure what was actually built and correct it. Predicting the gain from the source
     # track alone comes out about 3 dB low, because each crossfade sums two uncorrelated
@@ -149,7 +181,8 @@ def build_bed(track, seconds, out_path, cfg, voice_lufs):
         gain_db += correction
         built_lufs = loudness(out_path)
 
-    details = {"track": Path(track).name, "track_seconds": round(track_s, 1), "copies": copies,
+    details = {"track": Path(track).name, "track_seconds": round(track_s, 1),
+               "loop_block_seconds": round(block_s, 1), "copies": copies,
                "crossfade_s": round(crossfade, 1), "gain_db": round(gain_db, 2),
                "target_lufs": round(target_lufs, 1), "measured_lufs": round(built_lufs, 1),
                "correction_db": round(correction, 2),

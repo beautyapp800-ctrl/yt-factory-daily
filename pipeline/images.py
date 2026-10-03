@@ -48,6 +48,17 @@ log = get_logger("images")
 DEFAULT_IMAGES_PER_SECONDS = 12
 NEURON_SAMPLE_SIZE = 5
 DAILY_FREE_NEURONS = 10000
+# Leave this much of the daily allowance unspent. Retries are what would eat it: a run that
+# spends its last Neurons regenerating a picture that is merely imperfect has nothing left
+# for the pictures that do not exist yet.
+NEURON_RESERVE = 300
+
+# Checking a finished image for rendered lettering. Strict on purpose - see core.ocr - and
+# a flagged image is drawn again with a different seed, so a false alarm costs 96 Neurons
+# while a miss puts garbled words in the video. Measured on video 7: 15 of 72 flagged.
+TEXT_OCR = {"min_confidence": 50, "min_word_len": 3, "upscale": 2, "contrast": 1.6}
+TEXT_MIN_CHARS = 3
+TEXT_ATTEMPTS = 3          # first draw plus two redraws
 PROMPT_FIX_ATTEMPTS = 2
 OCR_MIN_CHARS = 8
 OCR_REGENERATE_ATTEMPTS = 1
@@ -145,6 +156,26 @@ def _fix_prompt_if_needed(scene, cfg):
     return prompt + suffix
 
 
+def _usable_image(path):
+    """Whether a file left over from an earlier run is a real image worth keeping."""
+    from PIL import Image
+    try:
+        with Image.open(path) as img:
+            width, height = img.size
+            img.verify()            # catches a file truncated by a run that was killed
+        return width >= 32 and height >= 32
+    except Exception:
+        return False
+
+
+def _reads_as_text(path):
+    """(flagged, characters) for rendered lettering in a finished image."""
+    if not ocr.available():
+        return False, 0
+    chars, _ = ocr.detect_text(path, **TEXT_OCR)
+    return chars >= TEXT_MIN_CHARS, chars
+
+
 def run(video_id, cfg):
     scenes = db.get_scenes(video_id)
     if not scenes:
@@ -179,12 +210,18 @@ def run(video_id, cfg):
     image_dir = output_dir(video_id) / "images"
     image_dir.mkdir(parents=True, exist_ok=True)
 
+    # What an earlier run of this video already produced. The files are what cost Neurons,
+    # so they are kept and the rows rebuilt around them: a run that died at the render must
+    # not pay for 70 pictures again, and on a 10,000 Neuron allowance it could not.
+    previous = {(row["scene_id"], row["idx"]): row for row in db.get_video_images(video_id)}
     db.clear_scene_images(video_id)
-    made, duplicated, failed, ocr_regenerated = 0, 0, 0, 0
+
+    made, reused, redrawn, duplicated, failed = 0, 0, 0, 0, 0
     by_provider = {}
     neuron_samples = []
-    neurons_total, cf_calls = 0.0, 0     # every Cloudflare call, OCR regenerations included
+    neurons_total, cf_calls = 0.0, 0     # every Cloudflare call, redraws included
     last_success_path = None
+    done = 0                             # image slots settled, for the budget guard
 
     for scene, count in plan:
         prompt = scene["image_prompt"] or ""
@@ -192,101 +229,119 @@ def run(video_id, cfg):
             log.warning("scene %d has no image_prompt, skipping its %d image(s)",
                         scene["idx"], count)
             failed += count
+            done += count
             continue
 
         cover_set = False
         for i in range(count):
-            # A fixed seed per (scene, image) so a re-run reproduces the same frame
-            # rather than drawing a new one every time. +500 on an OCR retry so a
-            # provider that does honour seed (pollinations) draws something different.
-            seed = scene["idx"] * 1000 + i
             out_path = image_dir / f"scene_{scene['idx']:03d}_{i:02d}.jpg"
+            base_seed = scene["idx"] * 1000 + i
+            old = previous.get((scene["id"], i))
+            # An image already on disk starts as attempt 0: it is still checked for
+            # lettering, so the flagged ones from an earlier run are redrawn now, but a
+            # clean one costs nothing.
+            from_disk = (old is not None and old["path"] == str(out_path)
+                         and out_path.exists() and _usable_image(out_path))
 
-            try:
-                used, neurons = images.synthesize(prompt, out_path, seed, cfg)
-            except images.ImageError as e:
+            provider = old["provider"] if from_disk else None
+            neurons, error, generated = None, None, False
+            flagged, chars = False, 0
+            for attempt in range(TEXT_ATTEMPTS):
+                if attempt == 0 and from_disk:
+                    pass                                     # nothing to generate yet
+                else:
+                    if attempt > 0:
+                        remaining = total_planned - done - 1
+                        per_image = (sum(neuron_samples) / len(neuron_samples)
+                                     if neuron_samples else 96)
+                        if neurons_total + per_image * (remaining + 1) > \
+                                DAILY_FREE_NEURONS - NEURON_RESERVE:
+                            log.warning("scene %d image %d: keeping a frame with lettering "
+                                        "(%d characters); redrawing it would leave too "
+                                        "little of the daily allowance for the %d images "
+                                        "still to make", scene["idx"], i + 1, chars, remaining)
+                            break
+                    try:
+                        # A different seed each attempt, so a provider that honours seed
+                        # draws something else rather than the same frame again.
+                        used, neurons = images.synthesize(
+                            prompt, out_path, base_seed + 500 * attempt, cfg)
+                    except images.ImageError as e:
+                        error = e
+                        break
+                    provider, error, generated = used, None, True
+                    if used == "cloudflare":
+                        cf_calls += 1
+                        neurons_total += neurons or 0
+                        if neurons is not None and len(neuron_samples) < NEURON_SAMPLE_SIZE:
+                            neuron_samples.append(neurons)
+                            log.info("neuron sample %d/%d: %.1f", len(neuron_samples),
+                                     NEURON_SAMPLE_SIZE, neurons)
+                    if attempt > 0:
+                        redrawn += 1
+
+                flagged, chars = _reads_as_text(out_path)
+                if not flagged:
+                    break
+                log.warning("scene %d image %d: OCR reads %d characters of lettering on it "
+                            "(attempt %d/%d)", scene["idx"], i + 1, chars, attempt + 1,
+                            TEXT_ATTEMPTS)
+            else:
+                db.log_event(video_id, "images", "warning",
+                             f"scene {scene['idx']} image {i + 1} still shows lettering "
+                             f"after {TEXT_ATTEMPTS} attempts")
+
+            done += 1
+            if error is not None and not from_disk:
                 if last_success_path is not None:
-                    # Cloudflare and pollinations both failed: show the most recent
-                    # successful frame again rather than leave a gap.
-                    db.add_scene_image(video_id, scene["id"], i, prompt=prompt, seed=seed,
+                    db.add_scene_image(video_id, scene["id"], i, prompt=prompt, seed=base_seed,
                                        provider="duplicate", path=str(last_success_path))
                     by_provider["duplicate"] = by_provider.get("duplicate", 0) + 1
                     duplicated += 1
                     cover_path = last_success_path
-                    log.info("scene %d image %d/%d: both providers failed (%s), "
-                            "duplicating %s", scene["idx"], i + 1, count, e,
-                            last_success_path.name)
+                    log.info("scene %d image %d/%d: both providers failed (%s), duplicating %s",
+                             scene["idx"], i + 1, count, error, last_success_path.name)
                 else:
-                    log.warning("scene %d image %d/%d failed with nothing yet to "
-                                "duplicate: %s", scene["idx"], i + 1, count, e)
+                    log.warning("scene %d image %d/%d failed with nothing yet to duplicate: %s",
+                                scene["idx"], i + 1, count, error)
                     db.log_event(video_id, "images", "warning",
-                                f"scene {scene['idx']} image {i + 1}/{count} failed: {e}")
+                                 f"scene {scene['idx']} image {i + 1}/{count} failed: {error}")
                     failed += 1
                     continue
             else:
-                if used == "cloudflare" and neurons is not None and \
-                        len(neuron_samples) < NEURON_SAMPLE_SIZE:
-                    neuron_samples.append(neurons)
-                    log.info("neuron sample %d/%d: %.1f", len(neuron_samples),
-                             NEURON_SAMPLE_SIZE, neurons)
-
-                if used == "cloudflare":
-                    cf_calls += 1
-                    neurons_total += neurons or 0
-                chars, mean_conf = ocr.detect_text(out_path)
-                if chars > OCR_MIN_CHARS:
-                    log.warning("scene %d image %d/%d: OCR read %d confident "
-                                "characters (%.0f%% conf), regenerating once",
-                                scene["idx"], i + 1, count, chars, mean_conf)
-                    try:
-                        used2, neurons2 = images.synthesize(prompt, out_path, seed + 500, cfg)
-                        used, neurons = used2, neurons2
-                        if used2 == "cloudflare":
-                            cf_calls += 1
-                            neurons_total += neurons2 or 0
-                        ocr_regenerated += 1
-                        chars2, _ = ocr.detect_text(out_path)
-                        if chars2 > OCR_MIN_CHARS:
-                            log.warning("scene %d image %d/%d: still %d characters "
-                                        "after regenerating, keeping it anyway",
-                                        scene["idx"], i + 1, count, chars2)
-                    except images.ImageError as e:
-                        log.warning("scene %d image %d/%d: OCR regeneration failed "
-                                    "(%s), keeping the original", scene["idx"], i + 1,
-                                    count, e)
-
-                db.add_scene_image(video_id, scene["id"], i, prompt=prompt, seed=seed,
-                                   provider=used, path=str(out_path))
-                by_provider[used] = by_provider.get(used, 0) + 1
-                made += 1
+                db.add_scene_image(video_id, scene["id"], i, prompt=prompt, seed=base_seed,
+                                   provider=provider or "reused", path=str(out_path))
+                by_provider[provider or "reused"] = by_provider.get(provider or "reused", 0) + 1
+                if generated:
+                    made += 1
+                else:
+                    reused += 1
                 last_success_path = out_path
                 cover_path = out_path
 
             if not cover_set:
-                # The scene's own single-image field becomes its cover/first frame,
-                # for anything downstream that only wants one representative image.
-                # Whichever image succeeds first (real or duplicated), not
-                # necessarily index 0.
+                # The scene's own single-image field becomes its cover/first frame, for
+                # anything downstream that only wants one representative image.
                 db.update_scene(scene["id"], image_path=str(cover_path))
                 cover_set = True
 
     _project_neuron_budget(neuron_samples, total_planned)
 
-    log.info("done: %d made, %d duplicated, %d failed of %d planned (%s), "
-             "%d OCR regenerations", made, duplicated, failed, total_planned,
-             ", ".join(f"{k}={v}" for k, v in by_provider.items()) or "none",
-             ocr_regenerated)
+    log.info("done: %d generated, %d reused from an earlier run, %d redrawn for lettering, "
+             "%d duplicated, %d failed of %d planned (%s)", made, reused, redrawn, duplicated,
+             failed, total_planned,
+             ", ".join(f"{k}={v}" for k, v in by_provider.items()) or "none")
     if cf_calls:
         log.info("neurons actually used: %.0f over %d Cloudflare calls (%.1f each), %.0f%% of "
                  "the %d/day free allowance", neurons_total, cf_calls,
                  neurons_total / cf_calls, 100 * neurons_total / DAILY_FREE_NEURONS,
                  DAILY_FREE_NEURONS)
     db.log_event(video_id, "images", "info",
-                 f"{made} made, {duplicated} duplicated, {failed} failed of "
-                 f"{total_planned} planned ({by_provider}), {ocr_regenerated} "
-                 f"OCR regenerations, {fixed_count} prompts rewritten, "
+                 f"{made} made, {reused} reused, {redrawn} redrawn for lettering, "
+                 f"{duplicated} duplicated, {failed} failed of {total_planned} planned "
+                 f"({by_provider}), {fixed_count} prompts rewritten, "
                  f"{neurons_total:.0f} neurons over {cf_calls} Cloudflare calls")
 
-    if made == 0 and duplicated == 0:
+    if made == 0 and reused == 0 and duplicated == 0:
         raise RuntimeError(f"no images were produced for any of {len(scenes)} scenes")
     return True

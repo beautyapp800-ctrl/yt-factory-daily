@@ -1,6 +1,6 @@
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 DB_PATH = Path(__file__).resolve().parent.parent / "data" / "factory.db"
@@ -63,13 +63,14 @@ CREATE TABLE IF NOT EXISTS events (
 
 _VIDEO_FIELDS = {"topic", "title", "status", "duration_s", "video_path",
                  "thumbnail_path", "youtube_id", "published_at", "error", "seed",
-                 "seo_title", "description", "tags"}
+                 "seo_title", "description", "tags", "attempts"}
 
 # Columns added after the first release, applied to existing databases by _migrate().
 # `title` is the script's working title; `seo_title` is the one published on YouTube
 # (the seo stage writes it, upload prefers it). `tags` is a JSON list.
 _MIGRATIONS = [("videos", "seed", "TEXT"), ("videos", "seo_title", "TEXT"),
-               ("videos", "description", "TEXT"), ("videos", "tags", "TEXT")]
+               ("videos", "description", "TEXT"), ("videos", "tags", "TEXT"),
+               ("videos", "attempts", "INTEGER DEFAULT 0")]
 
 
 def _now():
@@ -194,6 +195,38 @@ def get_video_images(video_id):
         rows = conn.execute(
             "SELECT * FROM scene_images WHERE video_id = ? ORDER BY scene_id, idx", (video_id,))
         return [dict(r) for r in rows]
+
+
+def oldest_unfinished(max_attempts, max_age_days=7):
+    """The video a new run should carry on with, or None to start a fresh one.
+
+    A run on a disposable machine can die anywhere: the point of resuming is that the
+    Neurons already spent on its pictures are not spent again. Two things stop that turning
+    into a channel that never posts again - a video is left alone once it has failed
+    max_attempts times, and once it is older than max_age_days, because whatever went wrong
+    with a video from last week is not going to be fixed by running it again today.
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat(
+        timespec="seconds")
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM videos WHERE (youtube_id IS NULL OR youtube_id = '') "
+            "AND status != 'published' AND COALESCE(attempts, 0) < ? AND created_at >= ? "
+            "ORDER BY created_at, id LIMIT 1", (max_attempts, cutoff)).fetchone()
+        return dict(row) if row else None
+
+
+def finished_stages(video_id):
+    """Stages that have already run to completion for this video, from the events log.
+
+    This is what makes resuming cheap and general: run.py skips them instead of each stage
+    having to work out for itself whether it has anything to do. The database and the output
+    directory are carried between runs together, so a stage marked finished has its files.
+    """
+    with _connect() as conn:
+        return {r["stage"] for r in conn.execute(
+            "SELECT DISTINCT stage FROM events WHERE video_id = ? AND level = 'info' "
+            "AND message = 'stage finished'", (video_id,))}
 
 
 def oldest_ready():

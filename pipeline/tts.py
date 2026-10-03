@@ -139,10 +139,48 @@ def _voice_sentences(video_id, scenes, cfg, pauses, boundaries, parts_dir):
     return timings, scene_wav_plans, narration_segments, spoken_seconds
 
 
+def already_voiced(video_id, scenes):
+    """Whether an earlier run of this video left a complete, matching narration.
+
+    The stage is the slow one that does not cost money - 19 minutes for a 30 minute video -
+    so on a disposable runner that resumes a half-finished video it should not be paid for
+    twice. "Complete" means voice.mp3 and timings.json both exist, the timings cover every
+    scene and every sentence of the current script, and every scene has a duration on it.
+    Anything less and the whole narration is made again, because a partly re-voiced track
+    cannot be stitched to timings from a different run.
+    """
+    out = output_dir(video_id)
+    voice, timings_path = out / "voice.mp3", out / "timings.json"
+    if not (voice.exists() and voice.stat().st_size > 10_000 and timings_path.exists()):
+        return False
+    try:
+        timings = json.loads(timings_path.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return False
+    wanted = sum(len(txt.split_sentences(s["text"])) or 1 for s in scenes)
+    if len(timings) != wanted:
+        log.info("the narration on disk covers %d sentences but the script has %d, so it is "
+                 "being voiced again", len(timings), wanted)
+        return False
+    if {t["scene_idx"] for t in timings} != {s["idx"] for s in scenes}:
+        return False
+    return all(s["duration_s"] and s["audio_path"] for s in scenes)
+
+
 def run(video_id, cfg):
     scenes = db.get_scenes(video_id)
     if not scenes:
         raise RuntimeError("no scenes to voice; did the script stage run?")
+
+    if already_voiced(video_id, scenes):
+        out = output_dir(video_id)
+        total = tts.wav_duration(out / "narration.wav") if (out / "narration.wav").exists() \
+            else json.loads((out / "timings.json").read_text(encoding="utf-8"))[-1]["end_s"]
+        log.info("narration already made by an earlier run (%d scenes, %.1f min); keeping it",
+                 len(scenes), total / 60)
+        db.update_video(video_id, duration_s=round(total, 1))
+        db.log_event(video_id, "tts", "info", "reused the narration from an earlier run")
+        return True
 
     provider, settings = tts.provider_settings(cfg)
     pauses = tts.pause_settings(cfg)
