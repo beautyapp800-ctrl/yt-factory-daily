@@ -20,11 +20,16 @@ client_secret*.json
 # Generated per-video output: scripts, audio, images, clips, the finished video.
 output/
 
-# SQLite database and any stray database file.
-data/
+# SQLite. The ONE database that belongs in git is data/factory.db: a GitHub runner is thrown
+# away after each run, and without this file the system would forget every topic it had used
+# and every video it had started. It holds topics, scripts, scene text and run events - no
+# keys (checked: no secret value appears in it) - and CI commits it back after every run.
+# Anything else that looks like a database stays out.
 *.db
 *.sqlite
 *.sqlite3
+data/*
+!data/factory.db
 
 # Logs
 logs/

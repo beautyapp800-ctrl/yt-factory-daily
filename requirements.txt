@@ -1,7 +1,7 @@
-piper-tts
 edge-tts
 Pillow
 pytesseract
+numpy
 google-auth-oauthlib
 google-api-python-client
 tzdata

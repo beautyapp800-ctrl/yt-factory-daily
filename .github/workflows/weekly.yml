@@ -1,0 +1,59 @@
+name: weekly
+
+# A health check, once a week: how many videos are queued ahead on YouTube, how many runs failed,
+# and what is left of the Cloudflare allowance. Emailed the same way as the daily summary.
+# The job turns red when nothing is queued ahead, which is the alarm level.
+
+on:
+  schedule:
+    - cron: "43 6 * * 1"          # Mondays 06:43 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      PYTHONUTF8: "1"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - run: pip install -r requirements.txt
+
+      - name: Build the report
+        id: report
+        continue-on-error: true    # exit code 2 means "alarm"; the report still has to be posted
+        run: |
+          python scripts/weekly_report.py --owner "${{ github.repository_owner }}" \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" > report.md
+          cat report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Post it (this is the email)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          number=$(gh issue list --label run-log --state open --json number --jq '.[0].number // empty')
+          if [ -z "$number" ]; then
+            gh label create run-log --color 0e8a16 --description "One comment per daily run" 2>/dev/null || true
+            number=$(gh issue create --title "Daily run log" --label run-log \
+              --body "One comment per daily run, mentioning the owner so it arrives as an email. Safe to ignore." \
+              | grep -o '[0-9]*$')
+          fi
+          gh issue comment "$number" --body-file report.md
+
+      - name: Red run when nothing is queued ahead
+        if: steps.report.outcome == 'failure'
+        run: exit 1

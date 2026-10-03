@@ -1,0 +1,240 @@
+"""Offline tests for the automation: resuming a video, the run notification, the weekly report.
+
+Run: python tests/test_ci.py
+No network, no ffmpeg: stages are replaced by recorders, the database is a temp file.
+"""
+import json
+import sqlite3
+import sys
+import tempfile
+from contextlib import closing
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "scripts"))
+
+import core.logger
+core.logger.LOG_DIR = Path(tempfile.mkdtemp(prefix="yt-factory-test-"))
+
+from core import config, db
+import run
+import ci_state
+import notify
+import weekly_report as weekly
+
+NOW = datetime(2026, 10, 10, 12, 0, tzinfo=timezone.utc)
+
+
+def check(cond, msg):
+    if not cond:
+        raise AssertionError(msg)
+    print(f"  ok: {msg}")
+
+
+def _fresh(tmp, name):
+    db.DB_PATH = tmp / f"{name}.db"
+    config.OUTPUT_DIR = tmp / f"out_{name}"
+    db.init_db()
+
+
+def _video(created_days_ago=0, **fields):
+    vid = db.create_video("topic")
+    created = (datetime.now(timezone.utc) - timedelta(days=created_days_ago)).isoformat(timespec="seconds")
+    with closing(sqlite3.connect(db.DB_PATH)) as conn:
+        conn.execute("UPDATE videos SET created_at = ? WHERE id = ?", (created, vid))
+        conn.commit()
+    if fields:
+        db.update_video(vid, **fields)
+    return vid
+
+
+# --- which video a run works on ----------------------------------------------------------
+
+def test_next_id_is_the_sequence_not_the_highest_survivor(tmp):
+    print("test_next_id_is_the_sequence_not_the_highest_survivor")
+    _fresh(tmp, "seq")
+    check(ci_state.next_video_id() == 1, "an empty database starts at 1")
+    for _ in range(3):
+        _video()
+    with closing(sqlite3.connect(db.DB_PATH)) as conn:
+        conn.execute("DELETE FROM videos WHERE id = 3")
+        conn.commit()
+    check(ci_state.next_video_id() == 4,
+          "AUTOINCREMENT does not reuse a deleted id, so the cache key matches the video the "
+          "run will really create")
+
+
+def test_an_unfinished_video_is_resumed_and_the_rest_are_not(tmp):
+    print("test_an_unfinished_video_is_resumed_and_the_rest_are_not")
+    _fresh(tmp, "pick")
+    done = _video(status="published", youtube_id="abc")
+    exhausted = _video(status="failed", attempts=db.MAX_ATTEMPTS)
+    stale = _video(created_days_ago=9, status="failed", attempts=1)
+    live = _video(status="failed", attempts=1)
+    newer = _video(status="scripting", attempts=0)
+    picked = db.oldest_unfinished(db.MAX_ATTEMPTS)
+    check(picked["id"] == live,
+          f"the oldest video that has attempts left and is recent is chosen (video {picked['id']})")
+    check(picked["id"] not in (done, exhausted, stale),
+          "not one already on YouTube, not one out of attempts, not one over a week old")
+    db.update_video(live, attempts=db.MAX_ATTEMPTS)
+    check(db.oldest_unfinished(db.MAX_ATTEMPTS)["id"] == newer, "and then the next one")
+    db.update_video(newer, attempts=db.MAX_ATTEMPTS)
+    check(db.oldest_unfinished(db.MAX_ATTEMPTS) is None, "with none left, a new video is started")
+
+
+# --- resuming skips what is done ---------------------------------------------------------
+
+class Stage:
+    def __init__(self, name, log, fail_first=False):
+        self.name, self.log, self.fail = name, log, fail_first
+
+    def run(self, video_id, cfg):
+        self.log.append(self.name)
+        if self.fail:
+            self.fail = False
+            raise RuntimeError(f"{self.name} fell over")
+        return True
+
+
+def test_a_failed_run_resumes_at_the_stage_that_failed(tmp):
+    print("test_a_failed_run_resumes_at_the_stage_that_failed")
+    _fresh(tmp, "resume")
+    vid = _video()
+    log = []
+    stages = [(n, Stage(n, log, fail_first=(n == "render")), s) for n, s in
+              (("topic", "pending"), ("script", "scripting"), ("tts", "tts"), ("images", "images"),
+               ("render", "rendering"), ("upload", "uploading"))]
+    original = run.STAGES
+    run.STAGES = stages
+    try:
+        check(run.process_video(vid, {}) is False, "the first run fails at the render")
+        first = list(log)
+        log.clear()
+        check(run.process_video(vid, {}) is True, "the second run completes")
+    finally:
+        run.STAGES = original
+    check(first == ["topic", "script", "tts", "images", "render"], f"first run: {first}")
+    check(log == ["render", "upload"],
+          f"second run starts at the render, so the pictures are not drawn again ({log})")
+    check(db.get_video(vid)["status"] == "ready", "and the video ends ready")
+    check({"topic", "script", "tts", "images"} <= db.finished_stages(vid),
+          "finished stages come from the events log")
+
+
+# --- the daily message -------------------------------------------------------------------
+
+def _events(vid, *rows):
+    for stage, level, message in rows:
+        db.log_event(vid, stage, level, message)
+
+
+def test_the_success_message_says_where_and_when(tmp):
+    print("test_the_success_message_says_where_and_when")
+    _fresh(tmp, "ok")
+    vid = _video(status="published", youtube_id="AbC123", seo_title="10 Stoic Lessons That Matter",
+                 published_at="2026-10-13T18:00:00Z", duration_s=1800.0, attempts=1)
+    _events(vid, ("images", "info", "70 made, 0 reused, 0 redrawn, 0 duplicated, 0 failed of 70 "
+                                   "planned ({}), 3 prompts rewritten, 6720 neurons over 70 Cloudflare calls"))
+    video = notify.latest_video()
+    text = notify.build_message("success", video, notify.run_events(vid), "https://example/run/1",
+                                owner="alice", now=NOW)
+    check(text.startswith("@alice "), "it mentions the owner, which is what makes it an email")
+    for needle in ("10 Stoic Lessons That Matter", "https://youtu.be/AbC123",
+                   "13.10.2026 18:00 UTC", "30.0 min", "6720", "https://example/run/1"):
+        check(needle in text, f"contains: {needle}")
+
+
+def test_the_failure_message_says_which_stage_and_what_happens_next(tmp):
+    print("test_the_failure_message_says_which_stage_and_what_happens_next")
+    _fresh(tmp, "bad")
+    vid = _video(status="failed", error="render: ffmpeg could not join the clips", attempts=1,
+                 title="Some Title")
+    _events(vid, ("render", "error", "ffmpeg could not join the clips"))
+    text = notify.build_message("failure", notify.latest_video(), notify.run_events(vid),
+                                "https://example/run/2", owner="alice", now=NOW)
+    check("FAILED" in text and "**render**" in text, "it names the failed stage")
+    check("ffmpeg could not join the clips" in text, "and the error text")
+    check("Attempt 1 of 3" in text and "2 attempt(s) left" in text,
+          "and how many attempts remain, with what the next run will do")
+    db.update_video(vid, attempts=db.MAX_ATTEMPTS)
+    text = notify.build_message("failure", notify.latest_video(), notify.run_events(vid), "u", now=NOW)
+    check("will not be retried" in text, "a video out of attempts says it will not be retried")
+    check("without a video" in notify.build_message("failure", None, [], "u", now=NOW),
+          "a run that recorded nothing says so rather than crashing")
+
+
+def test_a_run_that_never_started_does_not_describe_an_old_video(tmp):
+    print("test_a_run_that_never_started_does_not_describe_an_old_video")
+    _fresh(tmp, "nostart")
+    _video(status="published", youtube_id="old", seo_title="Last Week's Video", attempts=1)
+    text = notify.build_message("not-started", notify.latest_video(), [], "https://example/run/9",
+                                owner="alice", now=NOW)
+    check("did not start" in text and "preflight" in text, "it says the preflight failed")
+    check("Last Week's Video" not in text and "youtu.be" not in text,
+          "and does not dress an old video up as this run's result")
+
+
+def test_neurons_are_summed_across_runs():
+    print("test_neurons_are_summed_across_runs")
+    events = [{"message": "40 made, 3000 neurons over 31 Cloudflare calls"},
+              {"message": "30 reused, 1250 neurons over 13 Cloudflare calls"},
+              {"message": "stage finished"}]
+    check(notify.neurons_in(events) == 4250, "a video that took two runs reports both")
+
+
+# --- the weekly report -------------------------------------------------------------------
+
+def test_the_weekly_report_counts_the_queue_and_alarms_on_empty(tmp):
+    print("test_the_weekly_report_counts_the_queue_and_alarms_on_empty")
+    _fresh(tmp, "weekly")
+    future = lambda d: (NOW + timedelta(days=d)).isoformat(timespec="seconds").replace("+00:00", "Z")
+    past = (NOW - timedelta(days=2)).isoformat(timespec="seconds").replace("+00:00", "Z")
+    _video(status="published", youtube_id="a", published_at=future(1), seo_title="Tomorrow")
+    _video(status="published", youtube_id="b", published_at=future(3), seo_title="In three days")
+    _video(status="published", youtube_id="c", published_at=past, seo_title="Already public")
+    _video(status="failed")                                   # not on YouTube: not queued
+    text, queued = weekly.build_report(NOW, "alice", "u", (True, "open"))
+    check(queued == 2, f"two videos are queued ahead, the public one and the failed one are not ({queued})")
+    check("warning: only 2 video(s) queued ahead" in text, "fewer than 3 is a warning")
+    check(text.index("Tomorrow") < text.index("In three days"), "soonest first")
+    check("Already public" not in text, "a video whose moment has passed is not in the queue")
+    check("not asked of YouTube" in text, "and the report admits it reads its own records")
+
+    with closing(sqlite3.connect(db.DB_PATH)) as conn:
+        conn.execute("UPDATE videos SET published_at = ? WHERE youtube_id IN ('a','b')", (past,))
+        conn.commit()
+    text, queued = weekly.build_report(NOW, "", "", (None, "not run"))
+    check(queued == 0 and "ALARM" in text, "an empty queue is an alarm")
+
+
+def test_the_weekly_report_lists_failures_and_the_neurons_we_logged(tmp):
+    print("test_the_weekly_report_lists_failures_and_the_neurons_we_logged")
+    _fresh(tmp, "weekly2")
+    vid = _video(status="failed")
+    db.log_event(vid, "tts", "error", "edge-tts got a 403")
+    db.log_event(vid, "tts", "error", "edge-tts got a 403 again")
+    db.log_event(vid, "images", "info", "50 made, 4800 neurons over 50 Cloudflare calls")
+    now = datetime.now(timezone.utc)
+    text, _ = weekly.build_report(now, "", "", (False, "BLOCKED (HTTP 429)"))
+    check(text.count("edge-tts got a 403") == 1, "a repeated failure at one stage is listed once")
+    check("Failed runs in the last 7 days: 1" in text, "and counted once")
+    check("4800" in text and "BLOCKED" in text, "Neurons logged in the last day, and the live probe")
+    check("lower bound" in text, "and the report says the neuron figure is a lower bound")
+
+
+if __name__ == "__main__":
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        test_next_id_is_the_sequence_not_the_highest_survivor(tmp)
+        test_an_unfinished_video_is_resumed_and_the_rest_are_not(tmp)
+        test_a_failed_run_resumes_at_the_stage_that_failed(tmp)
+        test_the_success_message_says_where_and_when(tmp)
+        test_the_failure_message_says_which_stage_and_what_happens_next(tmp)
+        test_a_run_that_never_started_does_not_describe_an_old_video(tmp)
+        test_neurons_are_summed_across_runs()
+        test_the_weekly_report_counts_the_queue_and_alarms_on_empty(tmp)
+        test_the_weekly_report_lists_failures_and_the_neurons_we_logged(tmp)
+    print("ALL CI TESTS PASSED")

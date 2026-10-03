@@ -28,7 +28,7 @@ STAGES = [
     ("upload", upload, "uploading"),
 ]
 
-MAX_ATTEMPTS = 3        # tries at one video before it is left alone and a new one started
+MAX_ATTEMPTS = db.MAX_ATTEMPTS
 
 
 def process_video(video_id, cfg):

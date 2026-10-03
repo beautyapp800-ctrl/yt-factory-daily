@@ -1,0 +1,2 @@
+# Only for tts.provider = "piper" (offline voices, see README). Not needed for edge-tts.
+piper-tts

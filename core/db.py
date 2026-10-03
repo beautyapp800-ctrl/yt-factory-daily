@@ -65,6 +65,11 @@ _VIDEO_FIELDS = {"topic", "title", "status", "duration_s", "video_path",
                  "thumbnail_path", "youtube_id", "published_at", "error", "seed",
                  "seo_title", "description", "tags", "attempts"}
 
+# How many times a run may try one video before it is left alone and a new one is started.
+# One number, used by run.py, the CI state script and the notification text, so they cannot
+# drift apart.
+MAX_ATTEMPTS = 3
+
 # Columns added after the first release, applied to existing databases by _migrate().
 # `title` is the script's working title; `seo_title` is the one published on YouTube
 # (the seo stage writes it, upload prefers it). `tags` is a JSON list.
