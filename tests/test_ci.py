@@ -99,14 +99,30 @@ class Stage:
         return True
 
 
+class Voicer:
+    """A tts stage that sets the narration's length from a script of durations, and a script
+    stage that counts how many times it was asked to write."""
+
+    def __init__(self, lengths_min, log):
+        self.lengths, self.log, self.calls = list(lengths_min), log, 0
+
+    def run(self, video_id, cfg):
+        minutes = self.lengths[min(self.calls, len(self.lengths) - 1)]
+        self.calls += 1
+        self.log.append(f"tts({minutes})")
+        db.update_video(video_id, duration_s=minutes * 60)
+        return True
+
+
 def test_a_failed_run_resumes_at_the_stage_that_failed(tmp):
     print("test_a_failed_run_resumes_at_the_stage_that_failed")
     _fresh(tmp, "resume")
     vid = _video()
     log = []
-    stages = [(n, Stage(n, log, fail_first=(n == "render")), s) for n, s in
-              (("topic", "pending"), ("script", "scripting"), ("tts", "tts"), ("images", "images"),
-               ("render", "rendering"), ("upload", "uploading"))]
+    # the tts stage has to leave a publishable length behind, or the length gate rejects it
+    stages = [(n, Voicer([30.0], log) if n == "tts" else Stage(n, log, fail_first=(n == "render")), s)
+              for n, s in (("topic", "pending"), ("script", "scripting"), ("tts", "tts"),
+                           ("images", "images"), ("render", "rendering"), ("upload", "uploading"))]
     original = run.STAGES
     run.STAGES = stages
     try:
@@ -116,12 +132,66 @@ def test_a_failed_run_resumes_at_the_stage_that_failed(tmp):
         check(run.process_video(vid, {}) is True, "the second run completes")
     finally:
         run.STAGES = original
-    check(first == ["topic", "script", "tts", "images", "render"], f"first run: {first}")
+    check(first == ["topic", "script", "tts(30.0)", "images", "render"], f"first run: {first}")
     check(log == ["render", "upload"],
           f"second run starts at the render, so the pictures are not drawn again ({log})")
     check(db.get_video(vid)["status"] == "ready", "and the video ends ready")
     check({"topic", "script", "tts", "images"} <= db.finished_stages(vid),
           "finished stages come from the events log")
+
+
+# --- the length gate ---------------------------------------------------------------------
+
+def _gate_run(tmp, name, lengths, gate=None):
+    _fresh(tmp, name)
+    vid = _video()
+    log = []
+    stages = [("topic", Stage("topic", log), "pending"), ("script", Stage("script", log), "scripting"),
+              ("tts", Voicer(lengths, log), "tts"), ("images", Stage("images", log), "images"),
+              ("render", Stage("render", log), "rendering")]
+    original = run.STAGES
+    run.STAGES = stages
+    cfg = {"length_gate": gate} if gate else {}
+    try:
+        ok = run.process_video(vid, cfg)
+    finally:
+        run.STAGES = original
+    return vid, ok, log
+
+
+def test_a_script_of_the_wrong_length_is_written_again(tmp):
+    print("test_a_script_of_the_wrong_length_is_written_again")
+    vid, ok, log = _gate_run(tmp, "short", [25.0, 30.0])
+    check(ok, "the run succeeds once a script comes out in the window")
+    check(log == ["topic", "script", "tts(25.0)", "script", "tts(30.0)", "images", "render"],
+          f"25 minutes is too short, so the script and voice are redone and the topic is not ({log})")
+    check(db.get_video(vid)["status"] == "ready", "and the video ends ready")
+    check({"script", "tts"} <= db.finished_stages(vid),
+          "the redone stages count as finished again, because the newest record says so")
+
+
+def test_the_window_is_27_to_33_inclusive(tmp):
+    print("test_the_window_is_27_to_33_inclusive")
+    for minutes, expected in ((26.9, False), (27.0, True), (30.0, True), (33.0, True), (33.1, False)):
+        vid, ok, log = _gate_run(tmp, f"edge{minutes}", [minutes, minutes, minutes])
+        check(ok == expected, f"{minutes} minutes is {'accepted' if expected else 'rejected'}")
+
+
+def test_three_bad_scripts_in_a_row_fail_the_video(tmp):
+    print("test_three_bad_scripts_in_a_row_fail_the_video")
+    vid, ok, log = _gate_run(tmp, "never", [25.0, 24.0, 36.0])
+    check(not ok, "the run fails")
+    check(log.count("script") == 3 and "images" not in log,
+          f"three scripts were written and the pictures were never paid for ({log})")
+    video = db.get_video(vid)
+    check(video["status"] == "failed" and "gave up after 3 scripts" in video["error"],
+          f"the error says why ({video['error']})")
+
+
+def test_the_gate_reads_its_window_from_config(tmp):
+    print("test_the_gate_reads_its_window_from_config")
+    vid, ok, log = _gate_run(tmp, "narrow", [30.0], gate={"min_minutes": 31, "max_minutes": 33, "attempts": 1})
+    check(not ok, "a 30 minute narration fails a 31-33 window, with one attempt allowed")
 
 
 # --- the daily message -------------------------------------------------------------------
@@ -231,6 +301,10 @@ if __name__ == "__main__":
         test_next_id_is_the_sequence_not_the_highest_survivor(tmp)
         test_an_unfinished_video_is_resumed_and_the_rest_are_not(tmp)
         test_a_failed_run_resumes_at_the_stage_that_failed(tmp)
+        test_a_script_of_the_wrong_length_is_written_again(tmp)
+        test_the_window_is_27_to_33_inclusive(tmp)
+        test_three_bad_scripts_in_a_row_fail_the_video(tmp)
+        test_the_gate_reads_its_window_from_config(tmp)
         test_the_success_message_says_where_and_when(tmp)
         test_the_failure_message_says_which_stage_and_what_happens_next(tmp)
         test_a_run_that_never_started_does_not_describe_an_old_video(tmp)

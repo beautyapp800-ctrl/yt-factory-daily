@@ -31,14 +31,53 @@ STAGES = [
 MAX_ATTEMPTS = db.MAX_ATTEMPTS
 
 
+LENGTH_STAGES = ("script", "tts")      # what is thrown away and redone when the length is wrong
+LENGTH_DEFAULTS = {"min_minutes": 27, "max_minutes": 33, "attempts": 3}
+
+
+def length_problem(video_id, cfg):
+    """None if the narration is a publishable length, else a sentence saying how it is not.
+
+    Measured on the finished voice track, not predicted from the word count: the pace of the
+    same voice varies about +-2.5% between scripts, and the prediction is only as good as the
+    pace it is given. The window is wider than the 28-32 minutes the script stage aims for
+    (config.length_gate), so this is the net under that aim, not a second copy of it.
+    """
+    gate = {**LENGTH_DEFAULTS, **(cfg.get("length_gate") or {})}
+    minutes = (db.get_video(video_id).get("duration_s") or 0) / 60
+    if gate["min_minutes"] <= minutes <= gate["max_minutes"]:
+        return None
+    side = "short" if minutes < gate["min_minutes"] else "long"
+    return (f"the narration is {minutes:.1f} minutes, too {side}: the window is "
+            f"{gate['min_minutes']}-{gate['max_minutes']}")
+
+
+def _discard_narration(video_id):
+    """Delete the files of a narration that is being redone, so nothing downstream can
+    mistake it for the new one."""
+    from core.config import output_dir
+    out = output_dir(video_id)
+    for name in ("voice.mp3", "timings.json", "narration.wav", "script.txt", "outline.json"):
+        (out / name).unlink(missing_ok=True)
+
+
 def process_video(video_id, cfg):
-    """Run all stages for one video. Never raises: failures are recorded as status=failed."""
+    """Run all stages for one video. Never raises: failures are recorded as status=failed.
+
+    After the narration is voiced its length is checked; a script outside the window is
+    discarded and written again, up to config.length_gate.attempts times, within this run.
+    """
+    gate = {**LENGTH_DEFAULTS, **(cfg.get("length_gate") or {})}
+    redone = 0
     done = db.finished_stages(video_id)
     if done:
         log.info("resuming video %s: %s already finished", video_id,
                  ", ".join(n for n, _, _ in STAGES if n in done))
-    for name, module, status in STAGES:
+    index = 0
+    while index < len(STAGES):
+        name, module, status = STAGES[index]
         if name in done:
+            index += 1
             continue
         try:
             db.update_video(video_id, status=status)
@@ -46,6 +85,21 @@ def process_video(video_id, cfg):
             if not module.run(video_id, cfg):
                 raise RuntimeError(f"stage {name} returned False")
             db.log_event(video_id, name, "info", "stage finished")
+            done.add(name)
+
+            if name == "tts":
+                problem = length_problem(video_id, cfg)
+                if problem:
+                    redone += 1
+                    if redone >= gate["attempts"]:
+                        raise RuntimeError(f"{problem}; gave up after {redone} scripts")
+                    log.warning("video %s: %s; writing the script again (attempt %d of %d)",
+                                video_id, problem, redone + 1, gate["attempts"])
+                    db.invalidate_stages(video_id, LENGTH_STAGES, problem)
+                    _discard_narration(video_id)
+                    done -= set(LENGTH_STAGES)
+                    index = next(i for i, s in enumerate(STAGES) if s[0] == LENGTH_STAGES[0])
+                    continue
         except Exception as e:
             log.error("video %s failed at stage %s: %s", video_id, name, e)
             try:
@@ -54,6 +108,7 @@ def process_video(video_id, cfg):
             except Exception as db_err:
                 log.error("could not record failure in DB: %s", db_err)
             return False
+        index += 1
     db.update_video(video_id, status="ready")
     log.info("video %s finished: ready", video_id)
     return True

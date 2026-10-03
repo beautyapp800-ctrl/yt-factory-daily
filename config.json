@@ -43,7 +43,7 @@
   "image_style": "cinematic painterly illustration, wide horizontal composition, key subject within the central horizontal band, cinematic framing, muted earth tones, marble and weathered stone, soft volumetric light, quiet atmosphere, no text, no lettering, no watermark, no modern branding",
   "images": {
     "provider": "cloudflare",
-    "images_per_seconds": 22,
+    "images_per_seconds": 26,
     "cloudflare": {
       "model": "@cf/black-forest-labs/flux-1-schnell",
       "steps": 2
@@ -133,5 +133,10 @@
     "fade_in_s": 3.0,
     "fade_out_s": 5.0,
     "loop_crossfade_s": 4.0
+  },
+  "length_gate": {
+    "min_minutes": 27,
+    "max_minutes": 33,
+    "attempts": 3
   }
 }

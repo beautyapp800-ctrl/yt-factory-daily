@@ -227,11 +227,26 @@ def finished_stages(video_id):
     This is what makes resuming cheap and general: run.py skips them instead of each stage
     having to work out for itself whether it has anything to do. The database and the output
     directory are carried between runs together, so a stage marked finished has its files.
+
+    A stage counts as finished only if the LAST thing recorded about it is that it finished:
+    invalidate_stages() writes a later "stage invalidated" event, which is how a script that
+    came out the wrong length is thrown away without rewriting the log.
     """
     with _connect() as conn:
-        return {r["stage"] for r in conn.execute(
-            "SELECT DISTINCT stage FROM events WHERE video_id = ? AND level = 'info' "
-            "AND message = 'stage finished'", (video_id,))}
+        latest = {}
+        for r in conn.execute(
+                "SELECT stage, message FROM events WHERE video_id = ? AND level = 'info' "
+                "AND message IN ('stage finished', 'stage invalidated') ORDER BY id",
+                (video_id,)):
+            latest[r["stage"]] = r["message"]
+        return {stage for stage, message in latest.items() if message == "stage finished"}
+
+
+def invalidate_stages(video_id, stages, reason):
+    """Mark stages as not done, so the next pass over the pipeline runs them again."""
+    for stage in stages:
+        log_event(video_id, stage, "info", "stage invalidated")
+    log_event(video_id, "run", "warning", f"invalidated {', '.join(stages)}: {reason}")
 
 
 def oldest_ready():
