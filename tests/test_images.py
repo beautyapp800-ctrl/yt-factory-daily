@@ -295,7 +295,7 @@ def test_no_scenes_raises(tmp):
 def test_banned_prompt_is_fixed_before_generation(tmp):
     print("test_banned_prompt_is_fixed_before_generation")
     vid = _setup_video(tmp, "fixme", [24],
-                       prompts=["A delivery courier hands over a gift box with a label"])
+                       prompts=["A gift box with a label left on a doorstep"])
     seen_prompts = []
 
     def fake_cf(prompt, out_path, seed, cfg):
@@ -322,6 +322,91 @@ def test_banned_prompt_is_fixed_before_generation(tmp):
     scene = db.get_scenes(vid)[0]
     check(scene["image_prompt"] == "An empty stone courtyard at dawn, long shadows, no people",
           "the fix was persisted back to scenes.image_prompt, not just used transiently")
+
+
+def test_a_prompt_with_hands_or_a_face_is_rewritten(tmp):
+    print("test_a_prompt_with_hands_or_a_face_is_rewritten")
+    # The generator draws six fingers and three fingers, and nothing downstream can repair
+    # it, so a prompt that asks for hands is refused before anything is drawn.
+    vid = _setup_video(tmp, "anatomy", [24, 24, 24],
+                       prompts=["Fingers gripping a cold metal railing in a stairwell",
+                                "A close-up of a face lit by a phone screen",
+                                "An empty stairwell, winter light along a worn brass railing"])
+    asked, seen = [], []
+
+    def fake_cf(prompt, out_path, seed, cfg):
+        seen.append(prompt)
+        Path(out_path).write_bytes(b"x" * 2000)
+        return out_path, 96.0
+
+    def fake_llm(prompt, **kw):
+        asked.append(prompt)
+        return "An empty stairwell at dusk, winter light along the worn brass railing"
+
+    original = _stub(cloudflare=fake_cf, llm_complete=fake_llm)
+    try:
+        stage.run(vid, {"images": {"provider": "cloudflare", "images_per_seconds": 24}})
+    finally:
+        _restore(original)
+
+    check(len(asked) == 2, f"the two prompts with a hand or a face were sent for a rewrite ({len(asked)})")
+    check(all("hands or a face" in a for a in asked),
+          "and the rewrite request says what the problem is")
+    check(not any(w in p.lower() for p in seen for w in ("finger", "face", "gripping")),
+          f"nothing with a hand or a face reached the generator ({seen})")
+    prompts = [sc["image_prompt"] for sc in db.get_scenes(vid)]
+    check("stairwell" in prompts[0] and "finger" not in prompts[0].lower(),
+          f"and the fix is stored back on the scene ({prompts[0][:60]})")
+
+
+def test_a_stale_image_is_drawn_again_when_its_prompt_changed(tmp):
+    print("test_a_stale_image_is_drawn_again_when_its_prompt_changed")
+    # Reuse keys on the prompt the file was made with, not just the file name, or a rule
+    # change - taking hands out - would never reach the pictures already on disk.
+    vid = _setup_video(tmp, "stale", [24], prompts=["An empty platform in the rain"])
+    drawn = {"n": 0}
+
+    def fake_cf(prompt, out_path, seed, cfg):
+        drawn["n"] += 1
+        _write_real_jpeg(out_path, drawn["n"])
+        return out_path, 96.0
+
+    original = _stub(cloudflare=fake_cf, ocr_result=(0, 0))
+    try:
+        cfg = {"images": {"provider": "cloudflare", "images_per_seconds": 24}}
+        stage.run(vid, cfg)
+        after_first = drawn["n"]
+        stage.run(vid, cfg)
+        after_reuse = drawn["n"]
+        for sc in db.get_scenes(vid):
+            db.update_scene(sc["id"], image_prompt="A different empty platform at dawn")
+        stage.run(vid, cfg)
+    finally:
+        _restore(original)
+    check(after_reuse == after_first, f"an unchanged prompt reuses the file ({after_reuse - after_first} redrawn)")
+    check(drawn["n"] > after_reuse, f"a changed prompt draws it again ({drawn['n'] - after_reuse} redrawn)")
+
+
+def test_files_outside_the_plan_are_removed(tmp):
+    print("test_files_outside_the_plan_are_removed")
+    vid = _setup_video(tmp, "orphans", [24], prompts=["An empty platform in the rain"])
+    images_dir = config.output_dir(vid) / "images"
+    images_dir.mkdir(parents=True, exist_ok=True)
+    (images_dir / "scene_009_07.jpg").write_bytes(b"left over from a longer plan")
+
+    def fake_cf(prompt, out_path, seed, cfg):
+        _write_real_jpeg(out_path)
+        return out_path, 96.0
+
+    original = _stub(cloudflare=fake_cf, ocr_result=(0, 0))
+    try:
+        stage.run(vid, {"images": {"provider": "cloudflare", "images_per_seconds": 24}})
+    finally:
+        _restore(original)
+    check(not (images_dir / "scene_009_07.jpg").exists(),
+          "a file the plan has no slot for is deleted, so the cache stops carrying it")
+    check(len(list(images_dir.glob("*.jpg"))) == len(db.get_video_images(vid)),
+          "what is left is exactly what the database points at")
 
 
 def test_clean_prompt_skips_the_llm(tmp):
@@ -356,7 +441,7 @@ def test_style_suffix_is_not_scanned_for_banned_words(tmp):
     # Caught live on video 7: image_style carries "no lettering", and "lettering" is a
     # banned word, so every one of 43 perfectly good prompts was flagged for rewriting.
     vid = _setup_video(tmp, "stylescan", [24],
-                       prompts=[f"Hands holding a plain unmarked parcel, {STYLE}"])
+                       prompts=[f"A plain unmarked parcel on a doorstep at dusk, {STYLE}"])
     llm_calls = {"n": 0}
 
     def fake_cf(prompt, out_path, seed, cfg):
@@ -379,7 +464,7 @@ def test_style_suffix_is_not_scanned_for_banned_words(tmp):
 def test_fixed_prompt_keeps_its_style_suffix(tmp):
     print("test_fixed_prompt_keeps_its_style_suffix")
     vid = _setup_video(tmp, "stylekeep", [24],
-                       prompts=[f"A courier hands over a gift box with a label, {STYLE}"])
+                       prompts=[f"A gift box with a label on a doorstep, {STYLE}"])
     seen = []
 
     def fake_cf(prompt, out_path, seed, cfg):
@@ -387,14 +472,14 @@ def test_fixed_prompt_keeps_its_style_suffix(tmp):
         Path(out_path).write_bytes(b"\xff\xd8\xff" + b"\x00" * 50)
         return out_path, 96.0
 
-    original = _stub(cloudflare=fake_cf, llm_complete=lambda prompt, **kw: "Hands holding a plain unmarked parcel")
+    original = _stub(cloudflare=fake_cf, llm_complete=lambda prompt, **kw: "A plain unmarked parcel on a doorstep")
     try:
         stage.run(vid, {"image_style": STYLE,
                         "images": {"provider": "cloudflare", "images_per_seconds": 12}})
     finally:
         _restore(original)
     stored = db.get_scenes(vid)[0]["image_prompt"]
-    check(stored == f"Hands holding a plain unmarked parcel, {STYLE}",
+    check(stored == f"A plain unmarked parcel on a doorstep, {STYLE}",
           f"the rewrite got the style put back ({stored})")
     check(all(p == stored for p in seen), "the provider was sent the full prompt, style included")
 
@@ -569,6 +654,9 @@ if __name__ == "__main__":
         test_no_scenes_raises(tmp)
         test_banned_prompt_is_fixed_before_generation(tmp)
         test_clean_prompt_skips_the_llm(tmp)
+        test_a_prompt_with_hands_or_a_face_is_rewritten(tmp)
+        test_a_stale_image_is_drawn_again_when_its_prompt_changed(tmp)
+        test_files_outside_the_plan_are_removed(tmp)
         test_style_suffix_is_not_scanned_for_banned_words(tmp)
         test_fixed_prompt_keeps_its_style_suffix(tmp)
         test_total_neurons_are_counted_across_all_calls(tmp)

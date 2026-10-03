@@ -488,6 +488,12 @@ point at which scene it belongs to. A general mood piece - a landscape, an empty
 light through a window with nothing happening - could sit under any scene in any video
 and is a failure here, however pretty.
 
+No hands, no fingers, no faces. The generator renders them with six fingers or an
+expression that is almost right, and nothing later can repair it. A person may appear only
+as a silhouette, from behind, or far enough away that a hand is a few pixels. Where the
+scene is about what someone's hands are doing, show what is around them - the object put
+down, the empty chair, the room, the light - and let the act be understood.
+
 Return JSON: {{"prompts": [{{"scene": <number>, "prompt": "<15 to 30 words>"}}, ...]}}
 One entry for every scene listed, using the same scene numbers. JSON only."""
     data = complete_json(prompt, system=IMAGE_SYSTEM, max_tokens=1800, temperature=0.8)

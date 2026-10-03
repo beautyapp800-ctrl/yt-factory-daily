@@ -40,15 +40,73 @@ The generator will draw garbled pseudo-text on any surface you tell it carries w
 so keep writing off-frame, turned away, out of focus or lost in light - but keep the
 object, because the object is what ties the picture to the scene.
 
+Your third job is to keep human anatomy out of reach of the generator. It draws hands with
+six fingers and three fingers, and faces that are almost right and therefore worse than
+wrong. Nothing downstream can repair that, so the only fix is not to ask for it:
+
+NEVER write hands, fingers, a palm, a grip, a gesture, or anyone holding, touching,
+reaching, gripping, pressing, wiping or clasping anything. NEVER write a face, a portrait,
+an expression, eyes, a close-up of a person, or any view closer than the whole figure.
+
+A person may appear only where the generator cannot get them wrong:
+  - a silhouette against a window, a lamp, a doorway
+  - seen from behind, walking away, shoulders and coat
+  - far enough away that a hand is a few pixels: across a platform, down a corridor
+  - implied and absent: the chair they left, the coat on the hook, the light they turned on
+
+This channel is about Stoicism, and Stoicism does not need a close-up. It needs the room
+after the argument, the platform in the rain, the window at four in the morning. Most
+prompts should be a place, an object or the light in a room, with no person in them at all.
+
+When the scene's own sentence IS about the hands - signing, paying, reaching for a phone -
+build the picture from everything around them instead, and let the act be understood:
+  not "a hand reaching for a phone on the nightstand"
+      but "a phone face down on a nightstand, screen light on the ceiling, the bed empty"
+  not "fingers gripping a cold metal railing"
+      but "a worn brass railing in an empty stairwell, winter light along it"
+  not "hands counting banknotes at a kitchen table"
+      but "a kitchen table at night, notes and coins left in a loose pile, one chair pushed back"
+  not "a hand pressing the lift button"
+      but "a lift door closing on an empty marble lobby, the floor indicator lit"
+
 Rules for every prompt:
 - English, 15 to 30 words, describing one concrete moment.
 - Name one action or object taken from the scene's own text. That element must be visible.
-- No close-up faces and no real historical people. Hands, silhouettes, backs turned,
-  the view someone is looking at - all fine.
+- No hands, no fingers, no faces, no portraits, no real historical people. A person, if any,
+  is a silhouette, a back, or a distant figure.
 - Describe what is visible, not what it means. No abstractions like "the concept of time".
 - Do not add a style description; the pipeline appends one.
 
 Reply with valid JSON only."""
+
+
+# Words that put a hand or a face in frame. The generator is bad at both in a way nothing
+# downstream can fix - six fingers, three fingers, a face that is almost right - so these are
+# refused in code rather than only asked against. Checked as whole words, so "handle",
+# "handful", "beforehand" and "surface" are not hits.
+#
+# "arm", "shoulder" and "silhouette" are deliberately NOT here: a figure at a distance or in
+# outline is what the channel wants, and the generator renders it well.
+IMAGE_ANATOMY_WORDS = [
+    # the hand itself
+    "hand", "hands", "finger", "fingers", "fingertip", "fingertips", "thumb", "thumbs",
+    "palm", "palms", "knuckle", "knuckles", "fist", "fists", "wrist", "wrists",
+    "fingernail", "fingernails",
+    # what a hand is doing
+    "holding", "holds", "held", "gripping", "grips", "grip", "clutching", "clasping",
+    "clasped", "touching", "touches", "reaching", "reaches", "grasping", "grabbing",
+    "pressing", "presses", "typing", "scrolling", "wiping", "tracing", "pointing",
+    "gesture", "gestures", "gesturing", "handshake", "signing", "writing with",
+    "picking up", "putting down", "turning a page", "counting out",
+    # the face
+    "face", "faces", "facial", "portrait", "close-up of a man", "close-up of a woman",
+    "closeup", "close-up face", "eyes", "eye contact", "gaze", "stare", "staring at the camera",
+    "expression", "smile", "smiling", "frown", "frowning", "tears", "crying",
+    "mouth", "lips", "cheek", "cheeks", "forehead", "chin", "nose",
+    # framing that brings either one close
+    "close-up", "closeup", "macro", "extreme close", "head and shoulders", "bust shot",
+    "selfie",
+]
 
 # Words that ARE the writing rather than the object carrying it. A box can be drawn
 # unmarked and a laptop can be drawn as light on a face, but a "label" or a "logo" has
@@ -75,6 +133,36 @@ IMAGE_BANNED_WORDS = [
 _TEXT_CONTENT_PATTERN = __import__("re").compile(
     r"\$[\d,]+|reading [\"']?\w|that says|that read[s]?|written in|"
     r"the words? [\"']|says [\"']")
+
+
+def find_banned_anatomy_words(text):
+    """Which IMAGE_ANATOMY_WORDS appear in this prompt, as whole words or phrases.
+
+    Whole words matter here: "handle", "handful", "beforehand", "surface" and "household"
+    all contain "hand" and none of them puts a hand in the frame.
+    """
+    import re
+    low = (text or "").lower()
+    return [w for w in IMAGE_ANATOMY_WORDS if re.search(rf"\b{re.escape(w)}\b", low)]
+
+
+def anatomy_fix_request(original_prompt, hits):
+    """Ask for the same moment, built from what is around the hand instead of the hand."""
+    return f"""This image prompt puts human hands or a face in the frame:
+
+"{original_prompt}"
+
+The problem: {", ".join(hits)}. An image generator draws hands with six or three fingers and
+faces that are almost right, and nothing later in the pipeline can repair either, so the
+picture has to be built without them.
+
+Rewrite it for the SAME moment and the SAME place, 15 to 30 words, English, showing what is
+AROUND the action instead of the body performing it - the object left behind, the empty
+chair, the room, the light, the view. A person may appear only as a silhouette, from behind,
+or far enough away that a hand is a few pixels. Keep it specific to this scene: a generic
+landscape that could sit under any scene is not an improvement.
+
+Reply with the rewritten prompt only, no quotes, no JSON, no explanation."""
 
 
 def find_banned_image_words(text):

@@ -35,12 +35,14 @@ actually covers the whole video; the projection is logged plainly either way.
 """
 import json
 import re
+from pathlib import Path
 
 from core import db, images, ocr
 from core.config import output_dir
 from core.llm import complete
 from core.logger import get_logger
-from core.prompts import IMAGE_SYSTEM, find_banned_image_words, image_prompt_fix_request
+from core.prompts import (IMAGE_SYSTEM, anatomy_fix_request, find_banned_anatomy_words,
+                          find_banned_image_words, image_prompt_fix_request)
 from core.text import clean as clean_text
 
 log = get_logger("images")
@@ -120,36 +122,54 @@ def _split_style(prompt, cfg):
     return prompt, ""
 
 
+def _prompt_problems(prompt):
+    """(kind, hits) for the first rule this prompt breaks, or (None, []).
+
+    Two rules, both about things the generator renders badly enough that no later stage can
+    repair them: writing, which comes back as garbled pseudo-text, and hands and faces, which
+    come back with six fingers or an expression that is almost right. Anatomy is checked
+    first because it is the one that spoils a frame outright.
+    """
+    hits = find_banned_anatomy_words(prompt)
+    if hits:
+        return "anatomy", hits
+    hits = find_banned_image_words(prompt)
+    if hits:
+        return "lettering", hits
+    return None, []
+
+
 def _fix_prompt_if_needed(scene, cfg):
     """Rewrite scene['image_prompt'] in place (db + the in-memory dict) if its scene part
-    names a banned word. The style suffix is set aside while that happens and put back
-    after. Returns the (possibly unchanged) full prompt text."""
+    breaks a rule. The style suffix is set aside while that happens and put back after.
+    Returns the (possibly unchanged) full prompt text."""
     full = scene["image_prompt"] or ""
     prompt, suffix = _split_style(full, cfg)
-    hits = find_banned_image_words(prompt)
-    if not hits:
+    kind, hits = _prompt_problems(prompt)
+    if not kind:
         return full
 
     for attempt in range(1, PROMPT_FIX_ATTEMPTS + 1):
-        log.warning("scene %d image_prompt names %s, rewriting (attempt %d/%d)",
-                    scene["idx"], hits, attempt, PROMPT_FIX_ATTEMPTS)
+        log.warning("scene %d image_prompt has %s (%s), rewriting (attempt %d/%d)",
+                    scene["idx"], kind, hits, attempt, PROMPT_FIX_ATTEMPTS)
+        request = (anatomy_fix_request(prompt, hits) if kind == "anatomy"
+                   else image_prompt_fix_request(prompt, hits))
         try:
-            fixed = complete(image_prompt_fix_request(prompt, hits), system=IMAGE_SYSTEM,
-                             max_tokens=150, temperature=0.8)
+            fixed = complete(request, system=IMAGE_SYSTEM, max_tokens=150, temperature=0.8)
         except Exception as e:
             log.warning("scene %d prompt fix request failed: %s", scene["idx"], e)
             break
         fixed = clean_text(_unwrap_json_prompt(fixed)).strip(" \"'")
-        hits = find_banned_image_words(fixed)
-        if fixed and not hits:
+        kind, hits = _prompt_problems(fixed) if fixed else (kind, hits)
+        if fixed and not kind:
             log.info("scene %d image_prompt fixed: %s", scene["idx"], fixed[:80])
             db.update_scene(scene["id"], image_prompt=fixed + suffix)
             scene["image_prompt"] = fixed + suffix
             return fixed + suffix
         prompt = fixed or prompt
 
-    log.warning("scene %d image_prompt still names %s after %d attempts, using as-is",
-               scene["idx"], hits, PROMPT_FIX_ATTEMPTS)
+    log.warning("scene %d image_prompt still has %s (%s) after %d attempts, using as-is",
+               scene["idx"], kind, hits, PROMPT_FIX_ATTEMPTS)
     if prompt + suffix != scene["image_prompt"]:
         db.update_scene(scene["id"], image_prompt=prompt + suffix)
         scene["image_prompt"] = prompt + suffix
@@ -189,7 +209,8 @@ def run(video_id, cfg):
     log.info("cloudflare %s, ocr check %s, %.0fs per image", cf_note, ocr_note,
              images_per_seconds)
 
-    log.info("checking %d image_prompts for banned nouns before generation", len(scenes))
+    log.info("checking %d image_prompts for hands, faces and lettering before generation",
+             len(scenes))
     fixed_count = 0
     for scene in scenes:
         before = scene["image_prompt"]
@@ -240,7 +261,13 @@ def run(video_id, cfg):
             # An image already on disk starts as attempt 0: it is still checked for
             # lettering, so the flagged ones from an earlier run are redrawn now, but a
             # clean one costs nothing.
+            #
+            # It is only the same image if it was drawn from the same prompt. scene_images
+            # stores the prompt each file was made with, so a prompt the rules have since
+            # rewritten - hands taken out of it, say - makes the file on disk stale, and it
+            # is drawn again. Without this the rules could change and nothing would follow.
             from_disk = (old is not None and old["path"] == str(out_path)
+                         and (old["prompt"] or "") == prompt
                          and out_path.exists() and _usable_image(out_path))
 
             provider = old["provider"] if from_disk else None
@@ -324,6 +351,16 @@ def run(video_id, cfg):
                 # anything downstream that only wants one representative image.
                 db.update_scene(scene["id"], image_path=str(cover_path))
                 cover_set = True
+
+    # Files the plan no longer has a slot for. They are dead weight that the Actions cache
+    # would otherwise carry between runs for ever: lowering images_per_seconds from 22 to 26
+    # left 23 of video 7's 72 files orphaned in one go.
+    kept = {Path(r["path"]).resolve() for r in db.get_video_images(video_id)}
+    orphans = [f for f in image_dir.glob("*.jpg") if f.resolve() not in kept]
+    for f in orphans:
+        f.unlink(missing_ok=True)
+    if orphans:
+        log.info("removed %d image file(s) the current plan has no slot for", len(orphans))
 
     _project_neuron_budget(neuron_samples, total_planned)
 
