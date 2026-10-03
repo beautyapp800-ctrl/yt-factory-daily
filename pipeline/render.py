@@ -26,11 +26,12 @@ exists, so a failure partway through does not lose earlier scenes and a re-run
 picks up where it stopped. Because the whole shot plan is computed up front from the
 video id, a resumed run reproduces exactly the plan of the run it resumes.
 """
+import json
 import random
 import time
 from pathlib import Path
 
-from core import db, render
+from core import db, music, render
 from core.config import output_dir
 from core.logger import get_logger
 
@@ -242,10 +243,13 @@ def _build_scene_clip(scene, shots, cfg_render, parts_dir, cache_dir):
     for slot, shot in enumerate(shots):
         image_path = Path(shot["image"]["path"])
         sub_path = parts_dir / f"scene_{scene['idx']:03d}_slot{slot:02d}.mp4"
+        # The scene fades in on its first shot and out on its last, which is what makes the
+        # boundary between scenes; the joins inside a scene are hard cuts.
+        fades = {"fade_in": slot == 0, "fade_out": slot == len(shots) - 1}
         if not sub_path.exists():
             try:
                 render.kenburns_clip(image_path, sub_path, shot["duration_s"],
-                                     shot["movement"], cfg_render, cache_dir)
+                                     shot["movement"], cfg_render, cache_dir, **fades)
             except render.RenderError as e_render:
                 # Ken Burns timed out every attempt. Hold the frame still for the
                 # same duration rather than dropping the shot: a gap here would
@@ -253,9 +257,70 @@ def _build_scene_clip(scene, shots, cfg_render, parts_dir, cache_dir):
                 log.warning("scene %d shot %d: %s; falling back to a motionless shot",
                             scene["idx"], slot, e_render)
                 render.static_clip(image_path, sub_path, shot["duration_s"], cfg_render,
-                                   cache_dir)
+                                   cache_dir, **fades)
         sub_clips.append(sub_path)
     return sub_clips
+
+
+def display_durations(video_id, scenes, voice_seconds):
+    """How long each scene is on screen, which is NOT how long it is spoken.
+
+    The tts stage puts silence between scenes - 450ms, or 900ms where a lesson begins - and
+    that silence is in voice.mp3 but belongs to no scene's own duration. A video built from
+    the spoken durations is therefore shorter than its soundtrack, and every scene after the
+    first drifts further from the words: measured on video 7, 20.7s of drift over 43 scenes.
+
+    So a scene holds the screen from its own first sentence until the next scene's first
+    sentence, and the last one until the track ends. The picture then changes exactly when
+    the narration moves on, and the parts add up to the soundtrack by construction.
+
+    Returns {scene idx: seconds}, or None if timings.json cannot answer, in which case the
+    caller falls back to the spoken durations and the stage's duration check catches it.
+    """
+    path = output_dir(video_id) / "timings.json"
+    if not path.exists():
+        log.warning("no timings.json: scene lengths fall back to spoken duration, which "
+                    "leaves the gaps between scenes out of the video")
+        return None
+    starts = {}
+    for entry in json.loads(path.read_text(encoding="utf-8")):
+        starts.setdefault(entry["scene_idx"], entry["start_s"])
+    if not all(scene["idx"] in starts for scene in scenes):
+        log.warning("timings.json does not cover every scene: scene lengths fall back to "
+                    "spoken duration")
+        return None
+    ordered = sorted(starts)
+    out = {}
+    for i, idx in enumerate(ordered):
+        end = starts[ordered[i + 1]] if i + 1 < len(ordered) else voice_seconds
+        out[idx] = round(end - starts[idx], 3)
+    return out
+
+
+def _music_bed(video_id, cfg, voice_path, out_dir):
+    """The looped, levelled music bed for this video, or (None, reason) when there is none.
+
+    Never fatal: a video without music is a video; a failed render is not. Every way this
+    can come to nothing is logged with what to do about it.
+    """
+    settings = music.settings(cfg)
+    if not settings["enabled"]:
+        return None, "music is switched off in config.music.enabled"
+    tracks = music.available_tracks()
+    if not tracks:
+        log.warning("no music in %s, rendering without a bed", music.MUSIC_DIR)
+        return None, "no tracks in assets/music"
+    track = music.pick_track(video_id, tracks)
+    try:
+        voice_lufs = music.loudness(voice_path)
+        bed, details = music.build_bed(track, render.probe_duration(voice_path),
+                                       out_dir / "music_bed.m4a", cfg, voice_lufs)
+    except music.MusicError as e:
+        log.warning("could not build a music bed (%s), rendering without one", e)
+        db.log_event(video_id, "render", "warning", f"no music bed: {e}")
+        return None, str(e)
+    details["voice_lufs"] = round(voice_lufs, 1)
+    return bed, details
 
 
 def run(video_id, cfg):
@@ -289,6 +354,15 @@ def run(video_id, cfg):
         scene_items.append((scene, images_rows))
     if not scene_items:
         raise RuntimeError("no scene has a usable image; did the images stage run?")
+
+    on_screen = display_durations(video_id, scenes, render.probe_duration(voice_path))
+    if on_screen:
+        spoken = sum(s["duration_s"] or 0 for s, _ in scene_items)
+        scene_items = [({**dict(scene), "duration_s": on_screen[scene["idx"]]}, images)
+                       for scene, images in scene_items]
+        log.info("scene lengths taken from timings.json: %.1fs on screen against %.1fs "
+                 "spoken, the difference being the silence between scenes",
+                 sum(s["duration_s"] for s, _ in scene_items), spoken)
 
     shots = plan_shots(scene_items, cfg_render, video_id)
     by_scene = {}
@@ -328,15 +402,14 @@ def run(video_id, cfg):
 
     log.info("%d scene clips built, %d already on disk and reused", built, skipped)
 
-    log.info("cross-fading %d scene clips (%.1fs each)", len(scene_clip_paths),
-             cfg_render["crossfade_s"])
+    log.info("joining %d scene clips", len(scene_clip_paths))
     silent_path = out_dir / "_video_silent.mp4"
-    silent_duration = render.xfade_chain(scene_clip_paths, silent_path,
-                                         cfg_render["crossfade_s"], cfg_render)
+    silent_duration = render.join_clips(scene_clip_paths, silent_path)
     log.info("silent video: %.1f min", silent_duration / 60)
 
+    bed_path, bed_details = _music_bed(video_id, cfg, voice_path, out_dir)
     final_path = out_dir / "final.mp4"
-    render.mux_audio(silent_path, voice_path, final_path, cfg_render)
+    render.mux_audio(silent_path, voice_path, final_path, cfg_render, bed_path)
     silent_path.unlink(missing_ok=True)
 
     # --- checks -------------------------------------------------------------
@@ -372,6 +445,18 @@ def run(video_id, cfg):
 
     preview_path = out_dir / f"preview_{cfg_render['preview_seconds']}s.mp4"
     render.extract_preview(final_path, preview_path, cfg_render["preview_seconds"], cfg_render)
+
+    if bed_path:
+        measured = music.loudness(final_path)
+        gap = bed_details["voice_lufs"] - music.loudness(bed_path)
+        log.info("music check: bed at %.1f LUFS is %.1f dB under the voice (asked for %d); "
+                 "the finished mix measures %.1f LUFS against the voice's %.1f",
+                 music.loudness(bed_path), gap, music.settings(cfg)["gain_below_voice_db"],
+                 measured, bed_details["voice_lufs"])
+        if measured > bed_details["voice_lufs"] + 1.5:
+            log.warning("the mix is %.1f dB louder than the voice alone: the music is not "
+                        "sitting under it", measured - bed_details["voice_lufs"])
+        (out_dir / "music.json").write_text(json.dumps(bed_details, indent=2), encoding="utf-8")
 
     db.update_video(video_id, video_path=str(final_path), duration_s=round(final_duration, 1))
 

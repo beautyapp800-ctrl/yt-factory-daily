@@ -1,10 +1,11 @@
 """Offline tests for the render stage. Run: python tests/test_render.py
 
-No ffmpeg calls: core.render's kenburns_clip, concat_clips, xfade_chain, mux_audio,
+No ffmpeg calls: core.render's kenburns_clip, concat_clips, join_clips, mux_audio,
 extract_preview, probe_duration and frame_brightness are all stubbed, so this checks
 the pipeline's own logic (per-scene resumability, movement cycling, the sanity
 checks) without rendering real video.
 """
+import json
 import sys
 import tempfile
 from pathlib import Path
@@ -15,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import core.logger
 core.logger.LOG_DIR = Path(tempfile.mkdtemp(prefix="yt-factory-test-"))
 
-from core import config, db, render
+from core import config, db, music, render
 import pipeline.render as stage
 
 
@@ -27,7 +28,7 @@ def check(cond, msg):
 
 RENDER_CFG = {
     "width": 1920, "height": 1080, "fps": 24, "crf": 21, "preset": "medium",
-    "audio_bitrate_kbps": 192, "crossfade_s": 0.6, "upscale_factor": 4,
+    "audio_bitrate_kbps": 192, "scene_fade_s": 0.5, "upscale_factor": 4,
     "zoom_min": 1.08, "zoom_max": 1.26, "preview_seconds": 60,
     "double_exposure": False,
     "pan_movements": [{"zoom": "in", "pan": "right"}, {"zoom": "out", "pan": "left"},
@@ -52,22 +53,29 @@ class FakeFFmpeg:
     def __init__(self):
         self.kenburns_calls = []
         self.static_calls = []
+        self.fades = []
         self.concat_calls = []
-        self.xfade_calls = []
+        self.music_paths = []
+        self.bed_calls = []
+        self.join_calls = []
         self.durations = {}   # path (str) -> duration, for probe_duration to report
         self.brightness = 150.0
         self.kenburns_always_fails = False
 
-    def kenburns_clip(self, image_path, out_path, duration_s, movement, cfg_render, cache_dir):
+    def kenburns_clip(self, image_path, out_path, duration_s, movement, cfg_render, cache_dir,
+                      fade_in=False, fade_out=False):
         self.kenburns_calls.append((str(image_path), duration_s, dict(movement)))
+        self.fades.append((Path(out_path).name, fade_in, fade_out))
         if self.kenburns_always_fails:
             raise render.RenderError("Ken Burns timed out every attempt (simulated)")
         Path(out_path).write_bytes(b"\x00")
         self.durations[str(out_path)] = duration_s
         return out_path
 
-    def static_clip(self, image_path, out_path, duration_s, cfg_render, cache_dir):
+    def static_clip(self, image_path, out_path, duration_s, cfg_render, cache_dir,
+                    fade_in=False, fade_out=False):
         self.static_calls.append((str(image_path), duration_s))
+        self.fades.append((Path(out_path).name, fade_in, fade_out))
         Path(out_path).write_bytes(b"\x00")
         self.durations[str(out_path)] = duration_s
         return out_path
@@ -78,15 +86,20 @@ class FakeFFmpeg:
         self.durations[str(out_path)] = sum(self.durations.get(str(p), 0) for p in clip_paths)
         return out_path
 
-    def xfade_chain(self, clip_paths, out_path, crossfade_s, cfg_render):
-        self.xfade_calls.append([str(p) for p in clip_paths])
+    def build_bed(self, track, seconds, out_path, cfg, voice_lufs):
+        self.bed_calls.append((Path(track).name, round(seconds, 2), round(voice_lufs, 1)))
+        Path(out_path).write_bytes(b"0")
+        return Path(out_path), {"track": Path(track).name, "voice_lufs": voice_lufs}
+
+    def join_clips(self, clip_paths, out_path):
+        self.join_calls.append([str(p) for p in clip_paths])
         Path(out_path).write_bytes(b"\x00")
         total = sum(self.durations.get(str(p), 0) for p in clip_paths)
-        total -= crossfade_s * max(0, len(clip_paths) - 1)
         self.durations[str(out_path)] = total
         return total
 
-    def mux_audio(self, video_path, audio_path, out_path, cfg_render):
+    def mux_audio(self, video_path, audio_path, out_path, cfg_render, music_path=None):
+        self.music_paths.append(str(music_path) if music_path else None)
         Path(out_path).write_bytes(b"\x00" * 2_000_000)   # ~2MB placeholder
         self.durations[str(out_path)] = self.durations.get(str(video_path), 0)
         return out_path
@@ -104,24 +117,32 @@ class FakeFFmpeg:
 
 def _install_fake(fake):
     original = {name: getattr(render, name) for name in
-               ("kenburns_clip", "static_clip", "concat_clips", "xfade_chain", "mux_audio",
+               ("kenburns_clip", "static_clip", "concat_clips", "join_clips", "mux_audio",
                 "extract_preview", "probe_duration", "frame_brightness", "require_ffmpeg")}
     render.kenburns_clip = fake.kenburns_clip
     render.static_clip = fake.static_clip
     render.concat_clips = fake.concat_clips
-    render.xfade_chain = fake.xfade_chain
+    render.join_clips = fake.join_clips
     render.mux_audio = fake.mux_audio
     render.extract_preview = fake.extract_preview
     render.probe_duration = fake.probe_duration
     render.frame_brightness = fake.frame_brightness
     render.require_ffmpeg = lambda: None
     stage.render = render
+    # The music bed is a separate concern with its own tests; here it only has to be built
+    # and handed to the mux, so the ffmpeg behind it is replaced the same way.
+    original.update({f"music.{n}": getattr(music, n) for n in
+                     ("available_tracks", "loudness", "build_bed")})
+    music.available_tracks = lambda: [Path("assets/music/fake-track.ogg")]
+    music.loudness = lambda path: -15.8 if "voice" in str(path) else -41.8
+    music.build_bed = fake.build_bed
     return original
 
 
 def _restore(original):
     for name, fn in original.items():
-        setattr(render, name, fn)
+        module, _, attr = name.partition(".")
+        setattr(music if module == "music" else render, attr or module, fn)
 
 
 def _setup_video(tmp, name, scene_durations, images_per_scene=1):
@@ -161,6 +182,34 @@ def _shot_gaps(shots):
             gaps.append(k - seen[image_id] - 1)
         seen[image_id] = k
     return gaps
+
+
+def test_scene_lengths_cover_the_silence_between_scenes(tmp):
+    print("test_scene_lengths_cover_the_silence_between_scenes")
+    # The tts stage puts 450ms (or 900ms at a lesson) between scenes. That silence is in
+    # voice.mp3 but in no scene's spoken duration, so a video built from spoken durations
+    # drifts: 20.7s over 43 scenes, measured on video 7.
+    db.DB_PATH = tmp / "gaps.db"
+    config.OUTPUT_DIR = tmp / "out_gaps"
+    db.init_db()
+    vid = db.create_video("gap test")
+    for i, spoken in enumerate([10.0, 20.0, 15.0], 1):
+        db.add_scene(vid, i, text=f"Scene {i}.", image_prompt="x", duration_s=spoken)
+    # sentence starts: scene 1 at 0, scene 2 at 10.45, scene 3 at 30.9 (450ms gaps); the
+    # track runs 46.35s, which is 45 spoken plus two gaps.
+    (config.output_dir(vid) / "timings.json").write_text(json.dumps([
+        {"scene_idx": 1, "sentence_idx": 0, "start_s": 0.0, "end_s": 10.0},
+        {"scene_idx": 2, "sentence_idx": 0, "start_s": 10.45, "end_s": 30.45},
+        {"scene_idx": 3, "sentence_idx": 0, "start_s": 30.9, "end_s": 45.9},
+    ]), encoding="utf-8")
+
+    on_screen = stage.display_durations(vid, db.get_scenes(vid), 46.35)
+    check(on_screen == {1: 10.45, 2: 20.45, 3: 15.45},
+          f"each scene holds the screen until the next one speaks ({on_screen})")
+    check(abs(sum(on_screen.values()) - 46.35) < 1e-6,
+          "the scenes add up to the soundtrack exactly, so nothing can drift")
+    check(stage.display_durations(vid, db.get_scenes(vid) + [{"idx": 9}], 46.35) is None,
+          "a scene timings.json does not cover falls back rather than guessing")
 
 
 def test_every_image_plays_once_in_its_own_scene():
@@ -282,7 +331,7 @@ def test_full_run_builds_expected_clips(tmp):
     print("test_full_run_builds_expected_clips")
     vid = _setup_video(tmp, "basic", [20, 30], images_per_scene=2)
     fake = FakeFFmpeg()
-    fake.durations[str(config.output_dir(vid) / "voice.mp3")] = 20 + 30 - 0.6
+    fake.durations[str(config.output_dir(vid) / "voice.mp3")] = 20 + 30
     original = _install_fake(fake)
     try:
         check(stage.run(vid, {"render": RENDER_CFG}) is True, "the stage completes")
@@ -292,8 +341,8 @@ def test_full_run_builds_expected_clips(tmp):
     # 2 scenes x 2 images, shown once each = 4 shots.
     check(len(fake.kenburns_calls) == 4, f"4 shots rendered ({len(fake.kenburns_calls)})")
     check(len(fake.concat_calls) == 2, "one concat per scene (2 scenes)")
-    check(len(fake.xfade_calls) == 1, "one cross-fade pass across both scene clips")
-    check(len(fake.xfade_calls[0]) == 2, "the cross-fade saw exactly the 2 scene clips")
+    check(len(fake.join_calls) == 1, "one join pass across both scene clips")
+    check(len(fake.join_calls[0]) == 2, "the join saw exactly the 2 scene clips")
 
     video = db.get_video(vid)
     check(video["video_path"] is not None, "videos.video_path was written")
@@ -339,6 +388,58 @@ def test_contrasting_pairs_rejects_a_lookalike_repeat():
     check(len(single) == 1, "a single configured movement still yields a usable pair")
 
 
+def test_each_scene_fades_in_and_out_once(tmp):
+    print("test_each_scene_fades_in_and_out_once")
+    # Scene boundaries are made by fading each scene's first and last shot, because an
+    # xfade chain over the finished clips was measured at over 1h50m for 43 clips.
+    vid = _setup_video(tmp, "fades", [30, 30], images_per_scene=2)
+    fake = FakeFFmpeg()
+    fake.durations[str(config.output_dir(vid) / "voice.mp3")] = 60
+    original = _install_fake(fake)
+    try:
+        stage.run(vid, {"render": RENDER_CFG})
+    finally:
+        _restore(original)
+
+    by_scene = {}
+    for name, fade_in, fade_out in fake.fades:
+        by_scene.setdefault(name[:9], []).append((fade_in, fade_out))
+    check(len(by_scene) == 2, f"two scenes were rendered ({sorted(by_scene)})")
+    for scene, shots in by_scene.items():
+        check(shots[0][0] and not shots[0][1], f"{scene}: the first shot fades in, not out")
+        check(shots[-1][1] and not shots[-1][0], f"{scene}: the last shot fades out, not in")
+        middle = shots[1:-1]
+        check(not any(a or b for a, b in middle),
+              f"{scene}: shots inside the scene are hard cuts ({middle})")
+
+
+def test_the_music_bed_is_built_to_the_voice_and_handed_to_the_mux(tmp):
+    print("test_the_music_bed_is_built_to_the_voice_and_handed_to_the_mux")
+    vid = _setup_video(tmp, "music", [30], images_per_scene=1)
+    fake = FakeFFmpeg()
+    fake.durations[str(config.output_dir(vid) / "voice.mp3")] = 30
+    original = _install_fake(fake)
+    try:
+        stage.run(vid, {"render": RENDER_CFG})
+    finally:
+        _restore(original)
+    check(fake.bed_calls == [("fake-track.ogg", 30.0, -15.8)],
+          f"the bed is built to the voice's own length and loudness ({fake.bed_calls})")
+    check(fake.music_paths and fake.music_paths[0] and "music_bed" in fake.music_paths[0],
+          f"and the mux was given it ({fake.music_paths})")
+
+    other = _setup_video(tmp, "nomusic", [30], images_per_scene=1)
+    off = FakeFFmpeg()
+    off.durations[str(config.output_dir(other) / "voice.mp3")] = 30
+    original = _install_fake(off)
+    try:
+        stage.run(other, {"render": RENDER_CFG, "music": {"enabled": False}})
+    finally:
+        _restore(original)
+    check(off.bed_calls == [] and off.music_paths == [None],
+          "switched off in config, no bed is built and the mux gets the voice alone")
+
+
 def test_existing_scene_clip_is_skipped(tmp):
     print("test_existing_scene_clip_is_skipped")
     vid = _setup_video(tmp, "resume", [20, 20], images_per_scene=1)
@@ -349,7 +450,7 @@ def test_existing_scene_clip_is_skipped(tmp):
 
     fake = FakeFFmpeg()
     fake.durations[str(clips_dir / "scene_001.mp4")] = 20.0
-    fake.durations[str(out / "voice.mp3")] = 40 - 0.6
+    fake.durations[str(out / "voice.mp3")] = 40
     original = _install_fake(fake)
     try:
         stage.run(vid, {"render": RENDER_CFG})
@@ -372,7 +473,7 @@ def test_resumed_run_renders_the_same_shots_it_would_have(tmp):
     clips_dir = out / "clips"
 
     fake = FakeFFmpeg()
-    fake.durations[str(out / "voice.mp3")] = 60 - 1.2
+    fake.durations[str(out / "voice.mp3")] = 60
     original = _install_fake(fake)
     try:
         stage.run(vid, {"render": RENDER_CFG})
@@ -480,6 +581,7 @@ def test_static_fallback_keeps_timing_when_kenburns_fails(tmp):
 if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
+        test_scene_lengths_cover_the_silence_between_scenes(tmp)
         test_every_image_plays_once_in_its_own_scene()
         test_the_drift_reverses_on_every_shot()
         test_parked_double_exposure_never_repeats_back_to_back()
@@ -490,6 +592,8 @@ if __name__ == "__main__":
         test_full_run_builds_expected_clips(tmp)
         test_per_image_duration_split_evenly(tmp)
         test_contrasting_pairs_rejects_a_lookalike_repeat()
+        test_each_scene_fades_in_and_out_once(tmp)
+        test_the_music_bed_is_built_to_the_voice_and_handed_to_the_mux(tmp)
         test_existing_scene_clip_is_skipped(tmp)
         test_resumed_run_renders_the_same_shots_it_would_have(tmp)
         test_black_first_frame_raises(tmp)

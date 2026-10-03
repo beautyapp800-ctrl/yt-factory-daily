@@ -60,8 +60,8 @@
     "crf": 21,
     "preset": "medium",
     "audio_bitrate_kbps": 192,
-    "crossfade_s": 0.6,
     "upscale_factor": 3,
+    "scene_fade_s": 0.5,
     "zoom_min": 1.08,
     "zoom_max": 1.26,
     "pan_movements": [
@@ -124,5 +124,12 @@
     "category_id": "22",
     "default_language": "en",
     "chunk_mb": 8
+  },
+  "music": {
+    "enabled": true,
+    "gain_below_voice_db": 26,
+    "fade_in_s": 3.0,
+    "fade_out_s": 5.0,
+    "loop_crossfade_s": 4.0
   }
 }

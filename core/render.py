@@ -188,7 +188,28 @@ def contrasting_pairs(movements):
     return distinct or [(movements[0], movements[0])]
 
 
-def kenburns_clip(image_path, out_path, duration_s, movement, cfg_render, cache_dir):
+def _fade_filters(duration_s, cfg_render, fade_in, fade_out):
+    """fade=in / fade=out filters for a clip that begins or ends a scene.
+
+    This is how scene boundaries are made, and it replaces an xfade chain across the
+    finished scene clips. xfade was measured on this video: 43 clips did not finish in
+    1 hour 50 minutes and had to be killed, while the concat demuxer joined the same
+    clips in 3.9 seconds. Fading each clip costs nothing, because the clip is being
+    encoded anyway, and the join afterwards is a stream copy.
+    """
+    seconds = cfg_render.get("scene_fade_s", 0.5)
+    if seconds <= 0 or duration_s <= 2 * seconds:
+        return []
+    out = []
+    if fade_in:
+        out.append(f"fade=t=in:st=0:d={seconds}")
+    if fade_out:
+        out.append(f"fade=t=out:st={duration_s - seconds:.3f}:d={seconds}")
+    return out
+
+
+def kenburns_clip(image_path, out_path, duration_s, movement, cfg_render, cache_dir,
+                  fade_in=False, fade_out=False):
     """One Ken Burns sub-shot: a slice of the image, re-framed to fill the screen,
     with a slow zoom in or out across it. Video only, no audio.
 
@@ -239,6 +260,7 @@ def kenburns_clip(image_path, out_path, duration_s, movement, cfg_render, cache_
     chain.append(f"zoompan=z='{zoom_expr}':x='{x_expr}':y='{y_expr}':d={frames}:"
                  f"s={width}x{height}:fps={fps}")
     chain.append("setsar=1")
+    chain += _fade_filters(duration_s, cfg_render, fade_in, fade_out)
     vf = ",".join(chain)
 
     out_path = Path(out_path)
@@ -283,7 +305,8 @@ def kenburns_clip(image_path, out_path, duration_s, movement, cfg_render, cache_
     raise RenderError(f"Ken Burns for {out_path.name} timed out {attempts} times")
 
 
-def static_clip(image_path, out_path, duration_s, cfg_render, cache_dir):
+def static_clip(image_path, out_path, duration_s, cfg_render, cache_dir,
+                fade_in=False, fade_out=False):
     """A still frame held for duration_s, with no camera movement at all.
 
     The last resort when Ken Burns has timed out repeatedly. Deliberately not a
@@ -301,7 +324,8 @@ def static_clip(image_path, out_path, duration_s, cfg_render, cache_dir):
     out_path.parent.mkdir(parents=True, exist_ok=True)
     _run_ffmpeg(
         ["-loop", "1", "-i", str(prescaled),
-         "-vf", f"scale={width}:{height}:flags=lanczos,setsar=1",
+         "-vf", ",".join([f"scale={width}:{height}:flags=lanczos", "setsar=1"]
+                         + _fade_filters(duration_s, cfg_render, fade_in, fade_out)),
          "-t", f"{duration_s:.3f}", "-r", str(fps), "-pix_fmt", "yuv420p", "-an",
          "-c:v", "libx264", "-crf", str(cfg_render["crf"]),
          "-preset", cfg_render["preset"], str(out_path)],
@@ -330,57 +354,37 @@ def concat_clips(clip_paths, out_path):
     return out_path
 
 
-def xfade_chain(clip_paths, out_path, crossfade_s, cfg_render):
-    """Chain N scene clips into one video with a crossfade at every join, in a
-    single ffmpeg pass (one decode+encode per clip, not O(N^2) from re-encoding a
-    growing merged file N times). Returns the duration of the finished video.
+def join_clips(clip_paths, out_path):
+    """Join the finished scene clips into one video and return its duration.
+
+    A stream copy through the concat demuxer, which is why the scene boundaries are faded
+    into and out of black while each clip is being encoded (_fade_filters) instead of being
+    cross-faded here. Measured on video 7: an xfade chain over these 43 clips had not
+    finished after 1 hour 50 minutes and was killed; this takes about 4 seconds.
     """
-    if len(clip_paths) == 1:
-        # Nothing to cross-fade; just restate the one clip as the full video.
-        _run_ffmpeg(["-i", str(clip_paths[0]), "-c", "copy", str(out_path)],
-                   "ffmpeg could not copy the single scene clip")
-        return probe_duration(out_path)
-
-    durations = [probe_duration(p) for p in clip_paths]
-    inputs = []
-    for p in clip_paths:
-        inputs += ["-i", str(p)]
-
-    filters = []
-    label = "0"
-    merged_duration = durations[0]
-    for i in range(1, len(clip_paths)):
-        offset = max(0.0, merged_duration - crossfade_s)
-        next_label = f"v{i}"
-        filters.append(
-            f"[{label}][{i}]xfade=transition=fade:duration={crossfade_s}:"
-            f"offset={offset:.3f}[{next_label}]")
-        merged_duration = merged_duration + durations[i] - crossfade_s
-        label = next_label
-
-    filter_complex = ";".join(filters)
-    out_path = Path(out_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    _run_ffmpeg(
-        inputs + ["-filter_complex", filter_complex, "-map", f"[{label}]",
-                 "-pix_fmt", "yuv420p", "-r", str(cfg_render["fps"]),
-                 "-c:v", "libx264", "-crf", str(cfg_render["crf"]),
-                 "-preset", cfg_render["preset"], str(out_path)],
-        f"ffmpeg could not cross-fade {len(clip_paths)} scene clips",
-        timeout=1800)
+    concat_clips(clip_paths, out_path)
     return probe_duration(out_path)
 
 
-def mux_audio(video_path, audio_path, out_path, cfg_render):
+def mux_audio(video_path, audio_path, out_path, cfg_render, music_path=None):
     """Attach the finished audio track to the finished (silent) video. The video
     stream is copied as-is - it was already encoded at final settings by
-    xfade_chain - only the audio gets transcoded, to AAC."""
+    join_clips - only the audio gets transcoded, to AAC."""
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    args = ["-i", str(video_path), "-i", str(audio_path)]
+    if music_path:
+        # normalize=0 matters: amix's default divides every input by the number of inputs,
+        # which would drop the narration 6 dB to make room for a bed that is already 26 dB
+        # down. The bed was built to the voice's length, so duration=first cannot truncate.
+        args += ["-i", str(music_path),
+                 "-filter_complex", "[1:a][2:a]amix=inputs=2:duration=first:normalize=0[a]",
+                 "-map", "0:v:0", "-map", "[a]"]
+    else:
+        args += ["-map", "0:v:0", "-map", "1:a:0"]
     _run_ffmpeg(
-        ["-i", str(video_path), "-i", str(audio_path), "-map", "0:v:0", "-map", "1:a:0",
-         "-c:v", "copy", "-c:a", "aac", "-b:a", f"{cfg_render['audio_bitrate_kbps']}k",
-         "-movflags", "+faststart", "-shortest", str(out_path)],
+        args + ["-c:v", "copy", "-c:a", "aac", "-b:a", f"{cfg_render['audio_bitrate_kbps']}k",
+                "-movflags", "+faststart", "-shortest", str(out_path)],
         "ffmpeg could not mux audio into the final video")
     return out_path
 

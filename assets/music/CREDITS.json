@@ -1,0 +1,146 @@
+{
+  "note": "Every track here is available under CC0 1.0, chosen so the files can live in a public repository: a licence that forbids redistributing the audio on its own - which most 'free, no attribution' stock licences do - would be broken by committing it. CC0 asks for no attribution; the authors are credited here because they deserve to be.",
+  "picked_by": "measured on a 90s excerpt of each candidate: share of energy in the voice's own 300-4000 Hz band, rate of sharp spectral jumps (beats and events), and loudness range. Lowest combined score wins. See README.",
+  "tracks": [
+    {
+      "file": "egyptian-meditation-music.ogg",
+      "title": "Egyptian meditation music",
+      "author": "haeldb",
+      "source": "https://opengameart.org/content/egyptian-meditation-music",
+      "licence": "CC0 1.0 (https://creativecommons.org/publicdomain/zero/1.0/)",
+      "licences_offered": [
+        "OGA-BY 3.0",
+        "CC0"
+      ],
+      "seconds": 124.0,
+      "megabytes": 1.85,
+      "measured": {
+        "speech_band_share": 0.0181,
+        "onset_rate": 0.0121,
+        "loudness_range_db": 5.1444
+      }
+    },
+    {
+      "file": "tragic-ambient-main-menu.ogg",
+      "title": "Tragic ambient main menu",
+      "author": "haeldb",
+      "source": "https://opengameart.org/content/tragic-ambient-main-menu",
+      "licence": "CC0 1.0 (https://creativecommons.org/publicdomain/zero/1.0/)",
+      "licences_offered": [
+        "OGA-BY 3.0",
+        "CC0"
+      ],
+      "seconds": 100.0,
+      "megabytes": 1.97,
+      "measured": {
+        "speech_band_share": 0.0511,
+        "onset_rate": 0.0151,
+        "loudness_range_db": 6.6721
+      }
+    },
+    {
+      "file": "sirens-in-darkness.mp3",
+      "title": "Sirens in Darkness",
+      "author": "cynicmusic",
+      "source": "https://opengameart.org/content/sirens-in-darkness",
+      "licence": "CC0 1.0 (https://creativecommons.org/publicdomain/zero/1.0/)",
+      "licences_offered": [
+        "CC0"
+      ],
+      "seconds": 229.9,
+      "megabytes": 7.04,
+      "measured": {
+        "speech_band_share": 0.0534,
+        "onset_rate": 0.0003,
+        "loudness_range_db": 10.8214
+      }
+    },
+    {
+      "file": "cave-theme.ogg",
+      "title": "Cave Theme",
+      "author": "haeldb",
+      "source": "https://opengameart.org/content/cave-theme",
+      "licence": "CC0 1.0 (https://creativecommons.org/publicdomain/zero/1.0/)",
+      "licences_offered": [
+        "OGA-BY 3.0",
+        "CC0"
+      ],
+      "seconds": 280.0,
+      "megabytes": 3.2,
+      "measured": {
+        "speech_band_share": 0.0197,
+        "onset_rate": 0.0573,
+        "loudness_range_db": 7.4544
+      }
+    },
+    {
+      "file": "manaos-drones.ogg",
+      "title": "Manaos Drones",
+      "author": "tozan",
+      "source": "https://opengameart.org/content/manaos-drones",
+      "licence": "CC0 1.0 (https://creativecommons.org/publicdomain/zero/1.0/)",
+      "licences_offered": [
+        "CC0"
+      ],
+      "seconds": 144.9,
+      "megabytes": 0.66,
+      "measured": {
+        "speech_band_share": 0.0533,
+        "onset_rate": 0.0191,
+        "loudness_range_db": 12.2959
+      }
+    },
+    {
+      "file": "spacelife-14.ogg",
+      "title": "Spacelife #14",
+      "author": "yd",
+      "source": "https://opengameart.org/content/spacelife-14",
+      "licence": "CC0 1.0 (https://creativecommons.org/publicdomain/zero/1.0/)",
+      "licences_offered": [
+        "CC0"
+      ],
+      "seconds": 110.3,
+      "megabytes": 0.63,
+      "measured": {
+        "speech_band_share": 0.1357,
+        "onset_rate": 0.0085,
+        "loudness_range_db": 7.7774
+      }
+    },
+    {
+      "file": "hanging-in-the-black.mp3",
+      "title": "Hanging in the Black",
+      "author": "vishwajai",
+      "source": "https://opengameart.org/content/hanging-in-the-black",
+      "licence": "CC0 1.0 (https://creativecommons.org/publicdomain/zero/1.0/)",
+      "licences_offered": [
+        "CC0"
+      ],
+      "seconds": 139.9,
+      "megabytes": 4.48,
+      "measured": {
+        "speech_band_share": 0.0833,
+        "onset_rate": 0.0421,
+        "loudness_range_db": 7.9196
+      }
+    },
+    {
+      "file": "osare-unrest-theme.ogg",
+      "title": "Osare (Unrest Theme)",
+      "author": "haeldb",
+      "source": "https://opengameart.org/content/osare-unrest-theme",
+      "licence": "CC0 1.0 (https://creativecommons.org/publicdomain/zero/1.0/)",
+      "licences_offered": [
+        "OGA-BY 3.0",
+        "CC0"
+      ],
+      "seconds": 306.6,
+      "megabytes": 4.07,
+      "measured": {
+        "speech_band_share": 0.0666,
+        "onset_rate": 0.0499,
+        "loudness_range_db": 13.7555
+      }
+    }
+  ]
+}
