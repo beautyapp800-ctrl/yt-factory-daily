@@ -103,6 +103,21 @@ jobs:
             output/${{ steps.state.outputs.video_id }}/concept.json
           key: video-${{ steps.state.outputs.video_id }}-${{ github.run_id }}-${{ github.run_attempt }}
 
+      - name: Keep the finished video downloadable
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          # The runner is thrown away and final.mp4 is too big to cache, so without this the
+          # only copy is the one on YouTube, which cannot be downloaded back. 90 days is the
+          # maximum retention and costs nothing on a public repository.
+          name: video-${{ steps.state.outputs.video_id }}
+          path: |
+            output/${{ steps.state.outputs.video_id }}/final.mp4
+            output/${{ steps.state.outputs.video_id }}/thumbnail.jpg
+            output/${{ steps.state.outputs.video_id }}/script.txt
+          retention-days: 90
+          if-no-files-found: warn
+
       - name: Commit the database back
         if: always()
         run: |

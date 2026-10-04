@@ -109,8 +109,12 @@ def process_video(video_id, cfg):
                 log.error("could not record failure in DB: %s", db_err)
             return False
         index += 1
-    db.update_video(video_id, status="ready")
-    log.info("video %s finished: ready", video_id)
+    # "ready" means produced and waiting; a video that reached YouTube is past that. The
+    # upload stage sets published, and overwriting it here would have made every finished
+    # run look unpublished - caught on the first real run.
+    on_youtube = (db.get_video(video_id) or {}).get("youtube_id")
+    db.update_video(video_id, status="published" if on_youtube else "ready")
+    log.info("video %s finished: %s", video_id, "published" if on_youtube else "ready")
     return True
 
 

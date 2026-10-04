@@ -447,11 +447,31 @@ def build_scenes(full_text):
 
 # One per kind, for a scene whose prompt could not be written or was rejected. Deliberately
 # plain: a fallback should be unobtrusive, not interesting.
+# Several per kind, picked by scene number. One each would be worse than it looks: the
+# first real run fell back four times, and with a single landscape fallback that would have
+# been the same road four times in one video.
 FALLBACK_PROMPTS = {
-    "landscape": "an empty road at dusk under a wide grey sky, wet tarmac, no one in sight",
-    "interior": "an empty stairwell with worn steps, winter light from a high window",
-    "object": "a coat over the back of a wooden chair, a cold cup on the table beside it",
-    "light": "a shaft of late light across a bare floor, dust turning in it",
+    "landscape": [
+        "an empty road at dusk under a wide grey sky, wet tarmac, no one in sight",
+        "rain over a station platform at first light, the rails running away into mist",
+        "rooftops above a quiet street, chimneys against a pale morning sky",
+        "a bare field under low cloud, a line of trees at the far edge, wind in the grass",
+    ],
+    "interior": [
+        "an empty stairwell with worn steps, winter light from a high window",
+        "a kitchen late at night, one chair pushed back, the room otherwise still",
+        "a long corridor with doors closed on both sides, a lamp lit at the far end",
+    ],
+    "object": [
+        "a coat over the back of a wooden chair, a cold cup on the table beside it",
+        "a key and a few coins left on a windowsill, dust along the frame",
+        "a pair of worn shoes by a door, rainwater pooled under them",
+    ],
+    "light": [
+        "a shaft of late light across a bare floor, dust turning in it",
+        "a street lamp through a rain-streaked window, the glass smeared with it",
+        "the shadow of a railing laid out along a wall at the end of the day",
+    ],
 }
 
 
@@ -481,8 +501,11 @@ def add_image_prompts(scenes, cfg, outline):
     for i, value in enumerate(prompts):
         if not value:
             kind = shot_type_for(i)
-            log.warning("scene %d got no image prompt, using the %s fallback", i + 1, kind)
-            prompts[i] = f"{FALLBACK_PROMPTS[kind]}, {style}"
+            choices = FALLBACK_PROMPTS[kind]
+            chosen = choices[i % len(choices)]
+            log.warning("scene %d got no image prompt, using a %s fallback: %s",
+                        i + 1, kind, chosen[:60])
+            prompts[i] = f"{chosen}, {style}"
 
     kinds = [shot_type_for(i) for i in range(len(prompts))]
     share = kinds.count("landscape") / max(1, len(kinds))
@@ -541,8 +564,11 @@ One entry for every scene listed, using the same scene numbers. JSON only."""
         declared = str(entry.get("type", "")).strip().lower()
         problem = shot_type_problem(value, kind)
         if declared != kind or problem:
-            log.warning("scene %d was asked for a %s shot but came back as %r%s; rejected",
-                        scene_no, kind, declared, f" ({problem})" if problem else "")
+            # The prompt itself goes in the log: when this fires it is usually the checker
+            # that is too narrow, not the prompt that is wrong, and without the text there is
+            # no way to tell which.
+            log.warning("scene %d was asked for a %s shot but came back as %r%s; rejected: %r",
+                        scene_no, kind, declared, f" ({problem})" if problem else "", value[:90])
             continue
         result[scene_no - 1] = value
     if not result:

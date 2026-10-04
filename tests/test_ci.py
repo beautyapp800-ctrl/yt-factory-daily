@@ -139,6 +139,18 @@ def test_a_failed_run_resumes_at_the_stage_that_failed(tmp):
     check({"topic", "script", "tts", "images"} <= db.finished_stages(vid),
           "finished stages come from the events log")
 
+    # A video that reached YouTube must not be relabelled "ready" by the end of the run.
+    # Caught on the first real run: the upload stage set published and this overwrote it.
+    db.update_video(vid, youtube_id="abc123")
+    original = run.STAGES
+    run.STAGES = [("topic", Stage("topic", []), "pending")]
+    try:
+        run.process_video(vid, {})
+    finally:
+        run.STAGES = original
+    check(db.get_video(vid)["status"] == "published",
+          "a video with a youtube_id ends published, not ready")
+
 
 # --- the length gate ---------------------------------------------------------------------
 

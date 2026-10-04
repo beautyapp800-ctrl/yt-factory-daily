@@ -254,6 +254,18 @@ _OUTDOOR_CUES = [
     "platform", "station", "tracks", "railway", "city", "town", "village", "outdoors",
     "outside", "dusk", "dawn", "sunset", "sunrise", "moonlight", "streetlight", "traffic",
     "car park", "bus stop", "harbour", "dock", "farmland", "valley", "path", "lane",
+    # added after the first real run: ten prompts the model itself called landscapes were
+    # rejected because none of the words above appeared in them, and four scenes fell back
+    # to a stock view. These are what those prompts actually said.
+    "pavement", "sidewalk", "kerb", "curb", "crossing", "junction", "terrace", "balcony",
+    "yard", "driveway", "gate", "fence", "hedge", "wall outside", "puddle", "puddles",
+    "drizzle", "downpour", "overcast", "breeze", "gust", "frost", "ice", "sleet",
+    "pier", "quay", "embankment", "canal path", "towpath", "footpath", "track", "trail",
+    "bench", "lamppost", "street lamp", "railing outside", "car", "cars", "bus", "tram",
+    "train", "carriage window", "bicycle", "awning", "shopfront", "market", "churchyard",
+    "cemetery", "rooftop", "chimney", "skyscraper", "block of flats", "apartment block",
+    "parking", "layby", "motorway", "hillside", "field of", "open ground", "waste ground",
+    "sun", "sunlight outside", "moon", "stars", "night sky", "morning air", "evening air",
 ]
 
 
