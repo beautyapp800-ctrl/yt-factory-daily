@@ -559,17 +559,62 @@ def test_lettering_gives_up_after_three_attempts(tmp):
     finally:
         _restore(original)
 
-    check(calls["n"] == 2 * stage.TEXT_ATTEMPTS,
-          f"2 images x {stage.TEXT_ATTEMPTS} attempts and then it stops, rather than "
-          f"spending the whole allowance on one frame ({calls['n']})")
+    check(calls["n"] == 2 * (stage.TEXT_ATTEMPTS + 1),
+          f"2 images x {stage.TEXT_ATTEMPTS} redraws of the same prompt, then one more with "
+          f"the subject changed, and then it stops ({calls['n']})")
     check(len(db.get_video_images(vid)) == 2, "the images are kept anyway, lettering and all")
     import sqlite3
     from contextlib import closing
     with closing(sqlite3.connect(db.DB_PATH)) as conn:
         warnings = [r[0] for r in conn.execute(
             "SELECT message FROM events WHERE video_id = ? AND level = 'warning'", (vid,))]
-    check(any("still shows lettering" in w for w in warnings),
-          f"and it says so in the events table ({warnings[:2]})")
+    check(any("still shows lettering" in w and "text-free rewrite" in w for w in warnings),
+          f"and it says so in the events table, including that the rewrite did not help "
+          f"either ({warnings[:1]})")
+
+
+def test_a_subject_that_always_carries_writing_is_replaced(tmp):
+    print("test_a_subject_that_always_carries_writing_is_replaced")
+    # Redrawing the same prompt cannot clear lettering off a document: a picture of an
+    # invoice will have writing on it however it is worded. Measured on video 7 - the frame
+    # drawn for "a modest funeral invoice" had INVOICE across it and Tesseract could not read
+    # it at any setting, so the only fix is to stop asking for the invoice.
+    vid = _setup_video(tmp, "textfree", [24], prompts=["A candle burned down on a table"])
+    seen, asked = [], []
+
+    def fake_cf(prompt, out_path, seed, cfg):
+        seen.append(prompt)
+        Path(out_path).write_bytes(b"x" * 2000)
+        return out_path, 96.0
+
+    def fake_llm(prompt, **kw):
+        asked.append(prompt)
+        return "A candle burned down to the holder, chairs pushed back from a bare table"
+
+    # every draw reads as having lettering until the subject is changed
+    def fake_ocr(path, **kw):
+        return (0, 0) if "burned down to the holder" in (seen[-1] if seen else "") else (20, 90)
+
+    original = _stub(cloudflare=fake_cf, llm_complete=fake_llm)
+    ocr.detect_text = fake_ocr
+    try:
+        stage.run(vid, {"images": {"provider": "cloudflare", "images_per_seconds": 24}})
+    finally:
+        _restore(original)
+
+    check(len(seen) == stage.TEXT_ATTEMPTS + 1,
+          f"three redraws of the same prompt, then one of a different subject ({len(seen)})")
+    check(any("never carry writing" in a for a in asked),
+          "the last request asks for a subject that cannot carry writing")
+    check(seen[-1] != seen[0] and "holder" in seen[-1],
+          f"and the last draw used it ({seen[-1][:60]})")
+    import sqlite3
+    from contextlib import closing
+    with closing(sqlite3.connect(db.DB_PATH)) as conn:
+        warnings = [r[0] for r in conn.execute(
+            "SELECT message FROM events WHERE video_id = ? AND level = 'warning'", (vid,))]
+    check(not any("text-free rewrite" in w for w in warnings),
+          f"and nothing is logged as unresolved, because it was resolved ({warnings})")
 
 
 def test_images_from_an_earlier_run_are_not_paid_for_again(tmp):
@@ -662,6 +707,7 @@ if __name__ == "__main__":
         test_total_neurons_are_counted_across_all_calls(tmp)
         test_lettering_is_redrawn_with_a_different_seed(tmp)
         test_lettering_gives_up_after_three_attempts(tmp)
+        test_a_subject_that_always_carries_writing_is_replaced(tmp)
         test_images_from_an_earlier_run_are_not_paid_for_again(tmp)
         test_a_reused_image_with_lettering_is_still_redrawn(tmp)
     print("ALL IMAGES TESTS PASSED")

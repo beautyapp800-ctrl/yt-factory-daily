@@ -18,6 +18,7 @@ from core.llm import complete, complete_json
 from core.logger import get_logger
 from core.tts import pause_settings as tts_pause_settings
 from core.prompts import (CONCRETE_DETAIL_RULE, DOMAINS, EXAMPLE_TITLES, IMAGE_SYSTEM,
+                          SHOT_TYPES, SHOT_TYPE_BRIEF, shot_type_for, shot_type_problem,
                           LESSON_FORM_RULES, MAX_LESSONS_PER_DOMAIN,
                           NARRATION_SYSTEM, OUTLINE_SYSTEM, SCENE_SETTINGS,
                           TITLE_BANNED_WORDS, domain_of, forbidden_tics_rule)
@@ -444,6 +445,16 @@ def build_scenes(full_text):
                             max(30, int(retarget * 0.8)), int(retarget * 1.25))
 
 
+# One per kind, for a scene whose prompt could not be written or was rejected. Deliberately
+# plain: a fallback should be unobtrusive, not interesting.
+FALLBACK_PROMPTS = {
+    "landscape": "an empty road at dusk under a wide grey sky, wet tarmac, no one in sight",
+    "interior": "an empty stairwell with worn steps, winter light from a high window",
+    "object": "a coat over the back of a wooden chair, a cold cup on the table beside it",
+    "light": "a shaft of late light across a bare floor, dust turning in it",
+}
+
+
 def add_image_prompts(scenes, cfg, outline):
     """Ask for one image prompt per scene, in batches. Returns a list as long as scenes."""
     style = cfg["image_style"]
@@ -465,17 +476,26 @@ def add_image_prompts(scenes, cfg, outline):
             if all(prompts[start:start + len(batch)]):
                 break
 
-    # Anything still missing gets a plain prompt, so a scene is never left without one.
+    # Anything still missing gets a plain prompt of the kind that scene was owed, so a
+    # rejected answer does not quietly turn the rotation into a run of identical courtyards.
     for i, value in enumerate(prompts):
         if not value:
-            log.warning("scene %d got no image prompt, using the fallback", i + 1)
-            prompts[i] = ("empty stone courtyard at dawn, a single worn wooden bench, "
-                          f"long shadows across the flagstones, {style}")
+            kind = shot_type_for(i)
+            log.warning("scene %d got no image prompt, using the %s fallback", i + 1, kind)
+            prompts[i] = f"{FALLBACK_PROMPTS[kind]}, {style}"
+
+    kinds = [shot_type_for(i) for i in range(len(prompts))]
+    share = kinds.count("landscape") / max(1, len(kinds))
+    log.info("shot kinds: %s; outdoors %.0f%% of %d scenes",
+             ", ".join(f"{k}={kinds.count(k)}" for k in SHOT_TYPES), share * 100, len(kinds))
     return prompts
 
 
 def _ask_image_batch(batch, start, outline):
-    listed = "\n\n".join(f"SCENE {start + i + 1}:\n{scene}" for i, scene in enumerate(batch))
+    wanted = [shot_type_for(start + i) for i in range(len(batch))]
+    listed = "\n\n".join(f"SCENE {start + i + 1} (must be a {wanted[i].upper()} shot):\n{scene}"
+                         for i, scene in enumerate(batch))
+    kinds = "\n".join(f"  {name}: {SHOT_TYPE_BRIEF[name]}" for name in sorted(set(wanted)))
     prompt = f"""These are consecutive scenes from the narration of a video titled
 {outline['title']}. Write one image prompt for each scene, illustrating what that scene
 talks about.
@@ -494,7 +514,13 @@ as a silhouette, from behind, or far enough away that a hand is a few pixels. Wh
 scene is about what someone's hands are doing, show what is around them - the object put
 down, the empty chair, the room, the light - and let the act be understood.
 
-Return JSON: {{"prompts": [{{"scene": <number>, "prompt": "<15 to 30 words>"}}, ...]}}
+Each scene is marked with the KIND of shot it has to be. This is not a suggestion: left to
+itself the generator makes every frame a corridor or a counter, and a video of forty of those
+is unwatchable. The kinds in this batch:
+{kinds}
+
+Return JSON: {{"prompts": [{{"scene": <number>, "type": "<the kind asked for>",
+"prompt": "<15 to 30 words>"}}, ...]}}
 One entry for every scene listed, using the same scene numbers. JSON only."""
     data = complete_json(prompt, system=IMAGE_SYSTEM, max_tokens=1800, temperature=0.8)
     entries = data.get("prompts") if isinstance(data, dict) else data
@@ -509,8 +535,16 @@ One entry for every scene listed, using the same scene numbers. JSON only."""
         except (TypeError, ValueError):
             continue
         value = txt.clean(str(entry.get("prompt", "")))
-        if value and start < scene_no <= start + len(batch):
-            result[scene_no - 1] = value
+        if not value or not start < scene_no <= start + len(batch):
+            continue
+        kind = shot_type_for(scene_no - 1)
+        declared = str(entry.get("type", "")).strip().lower()
+        problem = shot_type_problem(value, kind)
+        if declared != kind or problem:
+            log.warning("scene %d was asked for a %s shot but came back as %r%s; rejected",
+                        scene_no, kind, declared, f" ({problem})" if problem else "")
+            continue
+        result[scene_no - 1] = value
     if not result:
         raise ValueError("no usable entries in response")
     return result

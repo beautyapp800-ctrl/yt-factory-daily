@@ -28,17 +28,25 @@ the morning is not illustrated by "a quiet landscape at dawn" - that could sit u
 scene in any video. Name one action or one object that the scene's own text mentions, and
 make it the thing the viewer sees.
 
-Your second job is to keep rendered text out of the frame, and the way to do that is NOT
-to avoid the object. Earlier versions banned every text-bearing noun outright and the
-results drifted into interchangeable scenery - safe, generic, illustrating nothing. Show
-the object WITHOUT its writing instead:
-  not "a box with a label"        but "hands holding a plain unmarked parcel"
-  not "a laptop on a desk"        but "screen light on a face in a dark room, the screen itself out of frame"
-  not "a shop sign above a door"  but "a lit doorway at dusk, the lettering lost in glare"
-  not "a newspaper on a table"    but "folded newsprint, face down, a cold mug beside it"
-The generator will draw garbled pseudo-text on any surface you tell it carries writing,
-so keep writing off-frame, turned away, out of focus or lost in light - but keep the
-object, because the object is what ties the picture to the scene.
+Your second job is to keep every kind of writing and every mark of ownership out of the
+frame. Two different costs: a recognisable trademark in a video is a claim from whoever owns
+the mark, and lettering of any kind looks cheap, because the generator renders it as garbled
+pseudo-letters.
+
+So NEVER name a thing whose purpose is to carry writing: a sign, a board, a label, a logo,
+an emblem, a badge, a document, an invoice, a receipt, a ticket, a timetable, a newspaper, a
+magazine, a book or its cover, packaging, a number plate, or a screen with an interface on it.
+
+Describing it as blank or unmarked does not work. An earlier version of these rules allowed
+the object and banned only the writing on it - "a plain unmarked parcel", "folded newsprint,
+face down". Measured on a finished video: the generator put INVOICE in serif capitals across
+the frame drawn from "a modest funeral invoice lying open on a table", and no checker could
+read it afterwards to catch it. If the thing is meant to be a document, it will have writing
+on it. Choose something else:
+  not "a funeral invoice on a table"  but "a candle burned down on a table, chairs pushed back"
+  not "a departure board overhead"    but "an empty platform under a long roof, rain blowing in"
+  not "a phone showing a message"     but "a phone face down on a nightstand, its glow on the ceiling"
+  not "an open book on a desk"        but "a reading lamp left on over an empty desk"
 
 Your third job is to keep human anatomy out of reach of the generator. It draws hands with
 six fingers and three fingers, and faces that are almost right and therefore worse than
@@ -108,20 +116,47 @@ IMAGE_ANATOMY_WORDS = [
     "selfie",
 ]
 
-# Words that ARE the writing rather than the object carrying it. A box can be drawn
-# unmarked and a laptop can be drawn as light on a face, but a "label" or a "logo" has
-# nothing left once you take the lettering away, so naming one guarantees pseudo-text.
+# Anything that puts writing or a mark of ownership in the frame. Two different costs: a
+# recognisable trademark in a video is a claim from whoever owns the mark, and lettering of
+# any kind looks cheap, because the generator renders it as garbled pseudo-text.
 #
-# This list used to be far longer and banned the objects themselves - phone, laptop,
-# box, bottle, book, paper. It worked: no more fake lettering. It also pushed the model
-# into interchangeable scenery, landscapes and doorways that illustrated no particular
-# scene, which cost more than the pseudo-text did. Objects are allowed again; only the
-# writing is not. See IMAGE_SYSTEM for how to show the object without its text.
+# This list bans the OBJECT, not only the writing on it, and that is a deliberate reversal.
+# An earlier version banned only the lettering words ("label", "logo") and let the object
+# through, on the grounds that a box can be drawn unmarked. Measured on video 7: it cannot.
+# The frame the generator drew for "a modest funeral invoice lying open on a table" has
+# INVOICE across it in serif capitals, and Tesseract cannot read it at any setting tried, so
+# no checker downstream will catch it either. A sheet of paper that is meant to be a document
+# will have writing on it. The only reliable way not to get the writing is not to ask for the
+# document.
 IMAGE_BANNED_WORDS = [
-    "label", "labelled", "labeled", "sign", "signage", "signpost", "billboard",
-    "placard", "poster", "banner", "tag", "price tag", "name tag", "sticker",
-    "logo", "brand", "branded", "headline", "caption", "slogan", "nameplate",
-    "inscription", "engraving", "lettering", "writing on", "text on",
+    # the writing itself
+    "text", "lettering", "letters", "writing on", "written", "handwriting", "printed",
+    "inscription", "engraving", "engraved", "caption", "subtitle", "headline", "slogan",
+    "word", "words", "number", "numbers", "digit", "digits", "price",
+    # things whose whole purpose is to carry writing
+    "label", "labelled", "labeled", "sign", "signage", "signpost", "signboard", "billboard",
+    "placard", "poster", "banner", "tag", "price tag", "name tag", "sticker", "nameplate",
+    "plaque", "notice", "noticeboard", "menu", "receipt", "invoice", "bill", "statement",
+    "cheque", "check stub", "payslip", "paycheck", "paystub", "ticket", "boarding pass",
+    "timetable", "departure board", "arrivals board", "scoreboard", "number plate",
+    "licence plate", "license plate", "banknote", "banknotes", "certificate", "diploma",
+    "contract", "document", "letter", "envelope", "postcard", "calendar", "chart", "graph",
+    "newspaper", "newsprint", "magazine", "book", "books", "bookshelf", "notebook",
+    "journal", "ledger", "diary", "page", "pages", "cover", "spine",
+    # marks of ownership
+    "logo", "emblem", "crest", "insignia", "monogram", "brand", "branded", "branding",
+    "trademark", "badge", "flag", "packaging", "wrapper", "carton", "bottle label",
+    # screens with an interface on them
+    "interface", "app", "application", "dashboard", "notification", "message on",
+    "screen showing", "screen displaying", "displaying", "display showing", "monitor showing",
+    "website", "browser", "keyboard", "spreadsheet", "chat", "inbox", "feed",
+]
+
+# Words that would otherwise be caught by the list above but are harmless, because they are
+# not the thing that carries writing. Checked as whole phrases before the ban is applied.
+IMAGE_BANNED_EXCEPTIONS = [
+    "screen light", "screen glow", "lamp light", "light on the screen", "face down",
+    "turned away", "blank screen", "dark screen", "screen dark", "unlit screen",
 ]
 
 # A prompt that spells out a literal amount or line of text ("a price tag reading
@@ -168,13 +203,105 @@ Reply with the rewritten prompt only, no quotes, no JSON, no explanation."""
 def find_banned_image_words(text):
     """Which IMAGE_BANNED_WORDS (if any) appear in this prompt, as whole words/phrases,
     plus a synthetic "spells out text/numbers" hit when the prompt itself dictates
-    literal characters to render (a price, a percentage, "reading ...", "that says ...")."""
+    literal characters to render (a price, a percentage, "reading ...", "that says ...").
+
+    Phrases in IMAGE_BANNED_EXCEPTIONS are blanked out first, so "screen light on the
+    ceiling" is allowed while "screen showing a message" is not.
+    """
     import re
     low = (text or "").lower()
+    for allowed in IMAGE_BANNED_EXCEPTIONS:
+        low = low.replace(allowed, " ")
     hits = [w for w in IMAGE_BANNED_WORDS if re.search(rf"\b{re.escape(w)}\b", low)]
     if _TEXT_CONTENT_PATTERN.search(low):
         hits.append("spells out literal text/numbers")
     return hits
+
+
+# --- the shape of a shot -----------------------------------------------------------------
+#
+# Left to itself the generator drifts into one kind of picture. Measured on video 7 after the
+# hands were banned: corridors, lifts and counters, with almost no outdoors at all, and the
+# mean similarity between frames rose from +0.013 to +0.033. So the kind of shot is decided
+# here, in code, and the model is told which one to write.
+SHOT_TYPES = ("landscape", "interior", "object", "light")
+
+# Nine shots, three of them outdoors, and no two neighbours of the same kind - including
+# across the wrap, so the pattern can repeat for as many scenes as a video has.
+SHOT_CYCLE = ("landscape", "interior", "object",
+              "landscape", "light", "interior",
+              "landscape", "object", "light")
+
+SHOT_TYPE_BRIEF = {
+    "landscape": ("an outdoor view, open air, no room around it: a street in rain, a station "
+                  "platform, a field at dusk, rooftops, a river, a road. If a person is in it "
+                  "they are far away and small."),
+    "interior": ("the inside of a room or building, empty or with one distant silhouette: a "
+                 "stairwell, a kitchen at night, a waiting room, a hall, a shop after closing."),
+    "object": ("one or two things resting somewhere, seen from a normal distance - not a "
+               "macro shot: a coat over a chair, a cup going cold, a key on a sill."),
+    "light": ("light itself as the subject: a shaft across a floor, a lamp in a dark room, "
+              "headlights through a window, the shadow of a railing, dawn on a wall."),
+}
+
+# A prompt that calls itself a landscape has to show some sign of being outdoors. Without
+# this the model labels a corridor "landscape" and the rotation means nothing.
+_OUTDOOR_CUES = [
+    "sky", "skyline", "horizon", "clouds", "cloud", "rain", "snow", "fog", "mist", "wind",
+    "street", "road", "pavement", "alley", "courtyard", "square", "park", "field", "meadow",
+    "hill", "hills", "mountain", "mountains", "river", "canal", "sea", "shore", "coast",
+    "beach", "lake", "forest", "trees", "tree", "garden", "rooftops", "roof", "bridge",
+    "platform", "station", "tracks", "railway", "city", "town", "village", "outdoors",
+    "outside", "dusk", "dawn", "sunset", "sunrise", "moonlight", "streetlight", "traffic",
+    "car park", "bus stop", "harbour", "dock", "farmland", "valley", "path", "lane",
+]
+
+
+def shot_type_for(index):
+    """The kind of shot the scene at this position must be."""
+    return SHOT_CYCLE[index % len(SHOT_CYCLE)]
+
+
+def looks_outdoors(text):
+    """Whether a prompt shows any sign of being out of doors."""
+    import re
+    low = (text or "").lower()
+    return any(re.search(rf"\b{re.escape(cue)}\b", low) for cue in _OUTDOOR_CUES)
+
+
+def shot_type_problem(prompt, wanted):
+    """None if the prompt fits the kind of shot it was asked for, else a short reason."""
+    if wanted not in SHOT_TYPES:
+        return None
+    if wanted == "landscape" and not looks_outdoors(prompt):
+        return "it was asked for an outdoor view but nothing in it is outdoors"
+    if wanted != "landscape" and prompt and looks_outdoors(prompt) and wanted == "interior":
+        return None            # a window onto a street is still an interior
+    return None
+
+
+def text_free_request(original_prompt, hits):
+    """Ask for the same moment with nothing in it that could carry writing at all.
+
+    The last resort, after redrawing the same prompt has failed to produce a frame without
+    lettering. At that point the subject itself is the problem - a document will have writing
+    on it however it is described - so the subject has to go.
+    """
+    return f"""An image generator keeps drawing garbled text into this picture:
+
+"{original_prompt}"
+
+{("It names " + ", ".join(hits) + ". ") if hits else ""}Redrawing it has not helped, so the
+subject itself has to change: anything that normally carries writing - paper, a document, a
+screen with an interface, a sign, a board, a book, packaging - will be drawn with lettering
+on it whatever the prompt says.
+
+Rewrite it for the SAME place and the SAME moment, 15 to 30 words, English, using ONLY
+things that never carry writing: furniture, cloth, stone, metal, glass, water, plants, food,
+weather, light and shadow. No paper, no screens, no signs, no packaging, no books. Keep it
+specific to this scene rather than retreating to a generic view.
+
+Reply with the rewritten prompt only, no quotes, no JSON, no explanation."""
 
 
 def image_prompt_fix_request(original_prompt, banned_hits):

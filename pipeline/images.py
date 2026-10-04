@@ -42,7 +42,8 @@ from core.config import output_dir
 from core.llm import complete
 from core.logger import get_logger
 from core.prompts import (IMAGE_SYSTEM, anatomy_fix_request, find_banned_anatomy_words,
-                          find_banned_image_words, image_prompt_fix_request)
+                          find_banned_image_words, image_prompt_fix_request,
+                          text_free_request)
 from core.text import clean as clean_text
 
 log = get_logger("images")
@@ -60,7 +61,7 @@ NEURON_RESERVE = 300
 # while a miss puts garbled words in the video. Measured on video 7: 15 of 72 flagged.
 TEXT_OCR = {"min_confidence": 50, "min_word_len": 3, "upscale": 2, "contrast": 1.6}
 TEXT_MIN_CHARS = 3
-TEXT_ATTEMPTS = 3          # first draw plus two redraws
+TEXT_ATTEMPTS = 3          # first draw plus two redraws, then one with the subject changed
 PROMPT_FIX_ATTEMPTS = 2
 OCR_MIN_CHARS = 8
 OCR_REGENERATE_ATTEMPTS = 1
@@ -174,6 +175,36 @@ def _fix_prompt_if_needed(scene, cfg):
         db.update_scene(scene["id"], image_prompt=prompt + suffix)
         scene["image_prompt"] = prompt + suffix
     return prompt + suffix
+
+
+def _draw_without_text(video_id, scene, prompt, out_path, seed, cfg):
+    """One last attempt with a subject that cannot carry writing.
+
+    Returns (provider, neurons, clean) when a frame was drawn - the caller counts the call
+    whether or not it helped - or None when nothing was drawn at all."""
+    hits = find_banned_image_words(prompt)
+    try:
+        rewritten = complete(text_free_request(prompt, hits), system=IMAGE_SYSTEM,
+                             max_tokens=150, temperature=0.8)
+    except Exception as e:                                        # noqa: BLE001
+        log.warning("scene %d: could not ask for a text-free rewrite: %s", scene["idx"], e)
+        return None
+    rewritten = clean_text(_unwrap_json_prompt(rewritten)).strip(" \"'")
+    if not rewritten or find_banned_image_words(rewritten) or find_banned_anatomy_words(rewritten):
+        log.warning("scene %d: the text-free rewrite still breaks the rules, keeping the frame",
+                    scene["idx"])
+        return None
+    log.info("scene %d: redrawing without anything that carries writing: %s",
+             scene["idx"], rewritten[:80])
+    try:
+        used, neurons = images.synthesize(rewritten, out_path, seed + 1500, cfg)
+    except images.ImageError as e:
+        log.warning("scene %d: the text-free redraw failed (%s)", scene["idx"], e)
+        return None
+    flagged, chars = _reads_as_text(out_path)
+    if flagged:
+        log.warning("scene %d: still %d characters after the text-free redraw", scene["idx"], chars)
+    return used, neurons, not flagged
 
 
 def _usable_image(path):
@@ -314,9 +345,23 @@ def run(video_id, cfg):
                             "(attempt %d/%d)", scene["idx"], i + 1, chars, attempt + 1,
                             TEXT_ATTEMPTS)
             else:
-                db.log_event(video_id, "images", "warning",
-                             f"scene {scene['idx']} image {i + 1} still shows lettering "
-                             f"after {TEXT_ATTEMPTS} attempts")
+                # Redrawing the same prompt has not cleared the lettering, so the subject
+                # itself is the problem: a document will be drawn with writing on it however
+                # it is described. Ask for the same moment built only from things that never
+                # carry writing, and draw once more.
+                rescued = _draw_without_text(video_id, scene, prompt, out_path, base_seed, cfg)
+                cleared = False
+                if rescued:
+                    provider, neurons, cleared = rescued
+                    generated = True
+                    redrawn += 1
+                    if provider == "cloudflare":
+                        cf_calls += 1
+                        neurons_total += neurons or 0
+                if not cleared:
+                    db.log_event(video_id, "images", "warning",
+                                 f"scene {scene['idx']} image {i + 1} still shows lettering "
+                                 f"after {TEXT_ATTEMPTS} attempts and a text-free rewrite")
 
             done += 1
             if error is not None and not from_disk:
