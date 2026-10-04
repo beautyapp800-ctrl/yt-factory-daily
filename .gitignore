@@ -43,3 +43,10 @@ __pycache__/
 .venv/
 venv/
 .pytest_cache/
+
+# Audit evidence that shows the owner's Google account: the OAuth consent, scope and
+# revocation screenshots and the bundle built from them. The repository is public.
+docs/*.png
+docs/*.jpg
+docs/*.jpeg
+docs/oauth-and-upload-evidence.pdf
