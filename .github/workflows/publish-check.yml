@@ -1,0 +1,67 @@
+name: publish-check
+
+# Every evening, shortly after the hour videos are scheduled for (21:00 Kyiv), check that the
+# ones whose moment has passed really did go public. A video held private by an unaudited API
+# project looks exactly like one that published correctly, unless something looks.
+#
+# It mails only when something is wrong. A daily "all fine" would be ignored within a week,
+# and then the one that matters would be ignored too.
+
+on:
+  schedule:
+    - cron: "11 19 * * *"         # 19:11 UTC = 22:11 Kyiv in summer, 21:11 in winter
+    - cron: "11 20 * * *"         # and again an hour later, so winter is covered too
+  workflow_dispatch:
+
+permissions:
+  contents: write                 # record the confirmation in the database
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check the videos whose moment has passed
+        id: check
+        continue-on-error: true   # exit 2 means "a video is still private"; the mail must still go
+        run: |
+          python scripts/check_published.py --owner "${{ github.repository_owner }}" \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Record what was confirmed
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/factory.db
+          if git diff --cached --quiet; then
+            echo "nothing new to record"
+          else
+            git commit -m "Publish check ${{ github.run_id }}"
+            git pull --rebase --autostash origin "${{ github.ref_name }}"
+            git push origin "HEAD:${{ github.ref_name }}"
+          fi
+
+      - name: Mail, but only if something is wrong
+        if: steps.check.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          number=$(gh issue list --label run-log --state open --json number --jq '.[0].number // empty')
+          if [ -z "$number" ]; then
+            gh label create run-log --color 0e8a16 --description "One comment per daily run" 2>/dev/null || true
+            number=$(gh issue create --title "Daily run log" --label run-log \
+              --body "One comment per daily run, mentioning the owner so it arrives as an email. Safe to ignore." \
+              | grep -o '[0-9]*$')
+          fi
+          gh issue comment "$number" --body-file publish_alert.md
+          exit 1

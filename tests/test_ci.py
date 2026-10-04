@@ -267,6 +267,113 @@ def test_neurons_are_summed_across_runs():
     check(notify.neurons_in(events) == 4250, "a video that took two runs reports both")
 
 
+# --- did it actually go public? ---------------------------------------------------------
+
+import check_published as pub
+
+
+class FakeOEmbed:
+    """urlopen stand-in: 200 with a title for a public id, 403 for a private one."""
+
+    def __init__(self, public_ids, error=None):
+        self.public, self.error, self.asked = set(public_ids), error, []
+
+    def __call__(self, request, timeout=None):
+        url = request.full_url
+        self.asked.append(url)
+        if self.error:
+            raise self.error
+        video_id = url.split("watch?v=")[1].split("&")[0]
+        if video_id in self.public:
+            import io, json as j
+            body = j.dumps({"title": f"title of {video_id}"}).encode()
+
+            class R:
+                def read(self_inner): return body
+                def __enter__(self_inner): return self_inner
+                def __exit__(self_inner, *a): return False
+            return R()
+        import urllib.error
+        raise urllib.error.HTTPError(url, 403, "Forbidden", {}, None)
+
+
+def _scheduled(when, youtube_id, title):
+    vid = _video(status="published", youtube_id=youtube_id, seo_title=title,
+                 published_at=when.isoformat(timespec="seconds").replace("+00:00", "Z"))
+    return vid
+
+
+def test_a_video_that_went_public_is_confirmed_once(tmp):
+    print("test_a_video_that_went_public_is_confirmed_once")
+    _fresh(tmp, "pubok")
+    vid = _scheduled(NOW - timedelta(hours=2), "goodid", "Published Fine")
+    due = pub.due_videos(NOW, grace_minutes=30)
+    check([v["id"] for v in due] == [vid], f"a video past its moment is due to be checked ({due})")
+
+    public, detail = pub.is_public("goodid", FakeOEmbed(["goodid"]))
+    check(public is True and "title of goodid" in detail, f"oEmbed says public ({detail})")
+    db.log_event(vid, "publish", "info", pub.CONFIRMED)
+    check(pub.due_videos(NOW, 30) == [], "once confirmed it is never checked again")
+
+
+def test_a_video_still_private_raises_the_alarm(tmp):
+    print("test_a_video_still_private_raises_the_alarm")
+    _fresh(tmp, "pubbad")
+    _scheduled(NOW - timedelta(hours=2), "privateid", "Should Have Published")
+    results = []
+    for v in pub.due_videos(NOW, 30):
+        ok, detail = pub.is_public(v["youtube_id"], FakeOEmbed([]))
+        results.append({"id": v["id"], "youtube_id": v["youtube_id"], "title": v["seo_title"],
+                        "published_at": v["published_at"], "public": ok, "detail": detail})
+    check(results[0]["public"] is False, "a private video reads as not public")
+    report = pub.build_report(results, NOW, owner="alice", run_url="u")
+    check(report and "@alice" in report and "Should Have Published" in report,
+          "the mail names the video and the owner")
+    check("audit" in report and "YouTube Studio" in report,
+          "and says the likely cause and what to do about it tonight")
+    check("https://youtu.be/privateid" in report, "with a link straight to it")
+
+
+def test_nothing_is_said_when_all_is_well(tmp):
+    print("test_nothing_is_said_when_all_is_well")
+    _fresh(tmp, "pubquiet")
+    good = [{"id": 1, "youtube_id": "a", "title": "Fine", "published_at": "x",
+             "public": True, "detail": "public"}]
+    check(pub.build_report(good, NOW) is None,
+          "a daily all-is-well mail would be ignored within a week, so none is sent")
+
+
+def test_a_video_not_yet_due_is_left_alone(tmp):
+    print("test_a_video_not_yet_due_is_left_alone")
+    _fresh(tmp, "pubearly")
+    _scheduled(NOW + timedelta(days=3), "futureid", "Next Week")
+    check(pub.due_videos(NOW, 30) == [], "a video whose moment has not come is not checked")
+    _scheduled(NOW - timedelta(minutes=5), "justnow", "Five Minutes Ago")
+    check(pub.due_videos(NOW, 30) == [],
+          "nor one published five minutes ago, inside the grace period")
+
+
+def test_a_network_failure_is_not_a_failed_publication(tmp):
+    print("test_a_network_failure_is_not_a_failed_publication")
+    public, detail = pub.is_public("anything", FakeOEmbed([], error=OSError("dns is down")))
+    check(public is None and "could not check" in detail,
+          f"an unanswerable question is not an answer of no ({detail})")
+    results = [{"id": 1, "youtube_id": "a", "title": "Unknown", "published_at": "x",
+                "public": None, "detail": detail}]
+    report = pub.build_report(results, NOW)
+    check(report and "not treated as a failure" in report,
+          "it is reported, but not as a video that failed to publish")
+
+
+def test_a_video_nobody_means_to_publish_can_be_retired(tmp):
+    print("test_a_video_nobody_means_to_publish_can_be_retired")
+    _fresh(tmp, "pubignore")
+    vid = _scheduled(NOW - timedelta(days=2), "testupload", "A Test Upload")
+    check(len(pub.due_videos(NOW, 30)) == 1, "a test upload would otherwise be reported nightly")
+    db.log_event(vid, "publish", "info", pub.IGNORED)
+    check(pub.due_videos(NOW, 30) == [], "marking it retires it from the check for good")
+
+
 # --- the weekly report -------------------------------------------------------------------
 
 def test_the_weekly_report_counts_the_queue_and_alarms_on_empty(tmp):
@@ -321,6 +428,12 @@ if __name__ == "__main__":
         test_the_failure_message_says_which_stage_and_what_happens_next(tmp)
         test_a_run_that_never_started_does_not_describe_an_old_video(tmp)
         test_neurons_are_summed_across_runs()
+        test_a_video_that_went_public_is_confirmed_once(tmp)
+        test_a_video_still_private_raises_the_alarm(tmp)
+        test_nothing_is_said_when_all_is_well(tmp)
+        test_a_video_not_yet_due_is_left_alone(tmp)
+        test_a_network_failure_is_not_a_failed_publication(tmp)
+        test_a_video_nobody_means_to_publish_can_be_retired(tmp)
         test_the_weekly_report_counts_the_queue_and_alarms_on_empty(tmp)
         test_the_weekly_report_lists_failures_and_the_neurons_we_logged(tmp)
     print("ALL CI TESTS PASSED")
