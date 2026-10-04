@@ -103,6 +103,11 @@ jobs:
             output/${{ steps.state.outputs.video_id }}/concept.json
           key: video-${{ steps.state.outputs.video_id }}-${{ github.run_id }}-${{ github.run_attempt }}
 
+      - name: Build the contact sheet (how the pictures are reviewed at a glance)
+        if: always()
+        continue-on-error: true
+        run: python scripts/contact_sheet.py ${{ steps.state.outputs.video_id }}
+
       - name: Keep the finished video downloadable
         if: always()
         uses: actions/upload-artifact@v4
@@ -113,7 +118,9 @@ jobs:
           name: video-${{ steps.state.outputs.video_id }}
           path: |
             output/${{ steps.state.outputs.video_id }}/final.mp4
+            output/${{ steps.state.outputs.video_id }}/contact_sheet.jpg
             output/${{ steps.state.outputs.video_id }}/thumbnail.jpg
+            output/${{ steps.state.outputs.video_id }}/thumb_small.jpg
             output/${{ steps.state.outputs.video_id }}/script.txt
           retention-days: 90
           if-no-files-found: warn

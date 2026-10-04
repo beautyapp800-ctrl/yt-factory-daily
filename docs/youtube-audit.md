@@ -109,9 +109,12 @@ the channel.
 
 **Do you have a privacy policy?**
 
-> The application collects no personal data from anyone, because it has no users other than
-> the channel owner and no interface through which data could be submitted. If the form insists
-> on a URL, see the note below.
+> Yes: https://beautyapp800-ctrl.github.io/yt-factory-daily/privacy.html
+>
+> It states what is true of this application: it has one user, its owner; it collects nothing
+> from anyone else, because it has no interface through which anything could be submitted; and
+> the token it holds carries a single scope that can upload to one channel and cannot read,
+> edit or delete anything.
 
 **How much quota do you need?**
 
@@ -131,9 +134,9 @@ the channel.
 
 1. **Перевірте номер проєкту.** У формі може стоять саме числовий *Project number*, а не
    `yt-factory-510411`. Він у Google Cloud Console на головній сторінці проєкту.
-2. **Якщо форма вимагає URL політики приватності** (поле може бути обов'язковим), скажіть мені:
-   я складу коротку сторінку й покладу її в репозиторій на GitHub Pages. Без цього поле нічим
-   заповнити чесно, а вигадувати посилання не можна.
+2. **Політика приватності вже є:**
+   https://beautyapp800-ctrl.github.io/yt-factory-daily/privacy.html
+   (вихідний текст — `docs/privacy.md`, сторінка роздається з GitHub Pages).
 3. **Надсилаєте ви.** Форма прив'язується до акаунта, під яким її відкрито: відкривайте під тим
    самим, де канал M1 Stories і проєкт Cloud.
 4. Відповідь приходить листом, зазвичай за кілька тижнів. Доти публікуйте вручну, якщо перевірка
@@ -141,6 +144,6 @@ the channel.
 
 ## Чого я в цій заявці не писав
 
-Я не стверджував, що в нас є політика приватності, застосунок із інтерфейсом чи
-демонстраційне відео — нічого з цього немає. Якщо аудитор наполягатиме, це доведеться
+Я не стверджував, що в нас є застосунок із інтерфейсом чи демонстраційне відео — нічого з
+цього немає. Політика приватності тепер є і каже лише те, що правда. Якщо аудитор наполягатиме, це доведеться
 зробити окремо, і я скажу як.
