@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>yt-factory - evidence of the upload flow</title>
+<style>
+  body { font: 15px/1.55 -apple-system, "Segoe UI", Roboto, sans-serif; color: #111;
+          max-width: 46rem; margin: 2rem auto; padding: 0 1.2rem; }
+  h1 { font-size: 1.6rem; margin-bottom: .2rem; }
+  h2 { font-size: 1.15rem; margin-top: 2rem; border-bottom: 1px solid #ddd;
+        padding-bottom: .25rem; }
+  .sub { color: #555; margin-top: 0; }
+  p { margin: .7rem 0; }
+  pre { background: #f6f8fa; border: 1px solid #e1e4e8; border-radius: 5px;
+         padding: .7rem .8rem; font: 11.5px/1.45 "Cascadia Mono", Consolas, monospace;
+         white-space: pre-wrap; word-break: break-word; }
+  .code .ln { color: #9aa0a6; user-select: none; }
+  .file { font: 11.5px "Cascadia Mono", Consolas, monospace; color: #444;
+           background: #eceff1; border: 1px solid #e1e4e8; border-bottom: none;
+           border-radius: 5px 5px 0 0; padding: .3rem .6rem; }
+  .file + pre { border-radius: 0 0 5px 5px; margin-top: 0; }
+  .note { color: #444; font-size: 13.5px; }
+</style></head><body>
+
+<h1>yt-factory — evidence of the upload flow</h1>
+<p class="sub">Project <b>yt-factory-510411</b> &middot; OAuth client
+147757322186-hj1csktsf05hq0jj4g43frlhmis9r1sr.apps.googleusercontent.com &middot;
+scope <code>youtube.upload</code></p>
+
+<p class="note">This application has no user interface to screenshot: it runs unattended on a
+server and publishes to one channel belonging to its owner. The equivalent evidence is below —
+the log of a real upload, and the source code that performed it. The run can be inspected in
+full at
+<a href="https://github.com/beautyapp800-ctrl/yt-factory-daily/actions/runs/37185441013">github.com/beautyapp800-ctrl/yt-factory-daily/actions/runs/37185441013</a>,
+and the source at <a href="https://github.com/beautyapp800-ctrl/yt-factory-daily">github.com/beautyapp800-ctrl/yt-factory-daily</a>.</p>
+
+<h2>1. Log of a real upload</h2>
+<p>GitHub Actions run 37185441013, 4 October 2026. The video was uploaded private with
+<code>publishAt</code> set three days ahead, and its thumbnail set in a second call. The video
+is <a href="https://youtu.be/gRePZohxtuM">youtu.be/gRePZohxtuM</a>, on the owner's own channel.</p>
+<pre>2026-10-04 08:01:38,414 | INFO    | seo        | title (62 chars): 10 Stoic Lessons To Keep Personal Promises When No One Watches
+2026-10-04 08:01:38,414 | INFO    | seo        | 13 tags, 12 chapter lines, description 1111 chars
+2026-10-04 08:01:39,399 | INFO    | thumbnail  | background scene_025_01.jpg skipped: OCR reads 3 characters on it
+2026-10-04 08:01:40,697 | INFO    | thumbnail  | background scene_028_00.jpg (contrast 87.7, rim 53.6, left 97.4, detail 14.0, ranked 2 of 60, 1 skipped for lettering)
+2026-10-04 08:01:40,697 | INFO    | thumbnail  | type: &#x27;WHEN NO&#x27; at 180px over &#x27;ONE WATCHES&#x27; at 94px, block 611x266 = 37% of the frame height (1 of 13 word pairs were on the table, 1 combinations tried)
+2026-10-04 08:01:40,697 | INFO    | thumbnail  | thumb_small.jpg readable: at 210x118 a capital in the smaller line is 13px (need 9), contrast 20.1:1 white and 9.7:1 amber (need 4.5:1); OCR read 50% of the words (informational)
+2026-10-04 08:01:40,951 | INFO    | upload     | uploading final.mp4 (327 MB) as &#x27;10 Stoic Lessons To Keep Personal Promises When No One Watches&#x27;, privacy private, going public at 2026-10-07T18:00:00Z
+2026-10-04 08:01:42,295 | INFO    | upload     | uploaded 2%
+2026-10-04 08:01:42,835 | INFO    | upload     | uploaded 10%
+2026-10-04 08:01:43,625 | INFO    | upload     | uploaded 20%
+2026-10-04 08:01:44,415 | INFO    | upload     | uploaded 30%
+2026-10-04 08:01:45,230 | INFO    | upload     | uploaded 41%
+2026-10-04 08:01:46,046 | INFO    | upload     | uploaded 51%
+2026-10-04 08:01:46,764 | INFO    | upload     | uploaded 61%
+2026-10-04 08:01:47,501 | INFO    | upload     | uploaded 71%
+2026-10-04 08:01:48,309 | INFO    | upload     | uploaded 82%
+2026-10-04 08:01:49,190 | INFO    | upload     | uploaded 92%
+2026-10-04 08:01:52,843 | INFO    | upload     | uploaded: https://youtu.be/gRePZohxtuM in 11.9s (40 chunks, 0 retries)
+2026-10-04 08:01:57,761 | INFO    | upload     | thumbnail set
+2026-10-04 08:01:57,762 | INFO    | upload     | quota: requests that cost quota this run {&#x27;videos.insert&#x27;: 1, &#x27;thumbnails.set&#x27;: 1}. videos.insert: documented as 1 unit in the separate uploads bucket (100 a day). thumbnails.set: documented as ~50 of the 10,000 general units a day. The API does not report usage; the real figure is in Google Cloud Console &gt; APIs &amp; Services &gt; YouTube Data API v3 &gt; Quotas &amp; System limits.</pre>
+
+<h2>2. The code that calls videos.insert with publishAt</h2>
+<p>The request body. When a video is scheduled it is uploaded <b>private</b> and YouTube is
+asked to publish it at a stated moment, which is what <code>status.publishAt</code> means.</p>
+<div class="file">pipeline/upload.py</div><pre class="code"><span class="ln"> 104</span> def build_body(video, cfg, now=None):
+<span class="ln"> 105</span>     &quot;&quot;&quot;The videos.insert request body for this video.&quot;&quot;&quot;
+<span class="ln"> 106</span>     privacy = cfg.get(&quot;privacy_status&quot;, &quot;private&quot;)
+<span class="ln"> 107</span>     if privacy not in PRIVACY:
+<span class="ln"> 108</span>         raise UploadError(f&quot;privacy_status {privacy!r} in config.json must be one of {PRIVACY}&quot;)
+<span class="ln"> 109</span>     yt = cfg.get(&quot;youtube&quot;) or {}
+<span class="ln"> 110</span>     tags = video.get(&quot;tags&quot;)
+<span class="ln"> 111</span>     tags = json.loads(tags) if isinstance(tags, str) and tags else (tags or [])
+<span class="ln"> 112</span>     status = {
+<span class="ln"> 113</span>         &quot;privacyStatus&quot;: privacy,
+<span class="ln"> 114</span>         &quot;selfDeclaredMadeForKids&quot;: MADE_FOR_KIDS,
+<span class="ln"> 115</span>         &quot;containsSyntheticMedia&quot;: CONTAINS_SYNTHETIC_MEDIA,
+<span class="ln"> 116</span>     }
+<span class="ln"> 117</span>     if cfg.get(&quot;schedule_publish&quot;, True):
+<span class="ln"> 118</span>         # YouTube requires a scheduled video to go up private; it makes it public itself at
+<span class="ln"> 119</span>         # publishAt. Asking for public AND a schedule is rejected, so privacy is forced here
+<span class="ln"> 120</span>         # rather than left to trip the upload.
+<span class="ln"> 121</span>         status[&quot;privacyStatus&quot;] = &quot;private&quot;
+<span class="ln"> 122</span>         status[&quot;publishAt&quot;] = publish_at(cfg, now)
+<span class="ln"> 123</span>     return {
+<span class="ln">    </span>         ... (the request body returned here is sent to videos.insert)</pre>
+
+<p>The moment itself is computed through the real time zone, so 21:00 local is correct in both
+summer and winter:</p>
+<div class="file">pipeline/upload.py</div><pre class="code"><span class="ln">  81</span> def publish_at(cfg, now=None):
+<span class="ln">  82</span>     &quot;&quot;&quot;When YouTube should make this video public, as RFC 3339 UTC.
+<span class="ln">  83</span> 
+<span class="ln">  84</span>     config.publish_time local time, config.publish_days_ahead days from now. The queue of
+<span class="ln">  85</span>     finished videos lives on YouTube rather than on disk, because the runner is disposable
+<span class="ln">  86</span>     and seven 300 MB files cannot be carried between runs; scheduling three days out means
+<span class="ln">  87</span>     three days of failed runs change nothing a viewer sees.
+<span class="ln">  88</span> 
+<span class="ln">  89</span>     The conversion is done through the real zone, not a fixed offset: Kyiv is UTC+3 in
+<span class="ln">  90</span>     summer and UTC+2 in winter, so 21:00 local is 18:00Z for part of the year and 19:00Z for
+<span class="ln">  91</span>     the rest, and an offset written down once would be wrong for half of it.
+<span class="ln">  92</span>     &quot;&quot;&quot;
+<span class="ln">  93</span>     zone = ZoneInfo(cfg.get(&quot;timezone&quot;) or DEFAULT_PUBLISH_TIMEZONE)
+<span class="ln">  94</span>     hour, _, minute = (cfg.get(&quot;publish_time&quot;) or DEFAULT_PUBLISH_TIME).partition(&quot;:&quot;)
+<span class="ln">  95</span>     days = int(cfg.get(&quot;publish_days_ahead&quot;, DEFAULT_DAYS_AHEAD))
+<span class="ln">  96</span>     local = (now or datetime.now(timezone.utc)).astimezone(zone)
+<span class="ln">  97</span>     when = (local + timedelta(days=days)).replace(hour=int(hour), minute=int(minute or 0),
+<span class="ln">  98</span>                                                   second=0, microsecond=0)
+<span class="ln">  99</span>     if when &lt;= local:
+<span class="ln"> 100</span>         when += timedelta(days=1)
+<span class="ln"> 101</span>     return when.astimezone(timezone.utc).isoformat(timespec=&quot;seconds&quot;).replace(&quot;+00:00&quot;, &quot;Z&quot;)</pre>
+
+<p>And the call, a resumable upload of the rendered file:</p>
+<div class="file">pipeline/upload.py</div><pre class="code"><span class="ln"> 266</span>     request = service.videos().insert(part=&quot;snippet,status&quot;, body=body, media_body=media)
+<span class="ln"> 267</span>     stats = {&quot;bytes&quot;: size, &quot;resumed_from&quot;: 0, &quot;retries&quot;: 0, &quot;chunks&quot;: 0,</pre>
+
+<h2>3. The code that sets containsSyntheticMedia</h2>
+<p>The narration is synthetic speech and the artwork is generated, so every upload declares it.
+These are constants, not configuration: no setting can switch them off.</p>
+<div class="file">pipeline/upload.py</div><pre class="code"><span class="ln">  49</span> # Set on every upload, not read from config: see the module docstring.
+<span class="ln">  50</span> MADE_FOR_KIDS = False
+<span class="ln">  51</span> CONTAINS_SYNTHETIC_MEDIA = True</pre>
+
+<p>They are checked on the request itself immediately before it is sent, and the upload is
+refused rather than sent undeclared:</p>
+<div class="file">pipeline/upload.py</div><pre class="code"><span class="ln"> 135</span> def assert_mandatory_flags(body):
+<span class="ln"> 136</span>     &quot;&quot;&quot;The two compliance flags, checked on the request itself just before it goes out.&quot;&quot;&quot;
+<span class="ln"> 137</span>     status = body.get(&quot;status&quot;) or {}
+<span class="ln"> 138</span>     if status.get(&quot;selfDeclaredMadeForKids&quot;) is not False:
+<span class="ln"> 139</span>         raise UploadError(&quot;status.selfDeclaredMadeForKids must be false on every upload&quot;)
+<span class="ln"> 140</span>     if status.get(&quot;containsSyntheticMedia&quot;) is not True:
+<span class="ln"> 141</span>         raise UploadError(&quot;status.containsSyntheticMedia must be true on every upload: &quot;
+<span class="ln"> 142</span>                           &quot;YouTube requires AI-generated content to be declared&quot;)</pre>
+
+</body></html>
