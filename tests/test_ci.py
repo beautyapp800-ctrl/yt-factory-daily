@@ -473,6 +473,18 @@ def test_the_heartbeat_speaks_the_day_the_queue_stops_growing(tmp):
     message, alert = build(now)
     check(not alert, "a day that produced a video and has cover raises nothing")
     check("Today's video" in message, "and names what was added")
+    check("5.0 days of cover" in message,
+          "cover is stated in fractions of a day, so a real three-day buffer (2.9 days) is "
+          "not rounded down into a nightly false alarm")
+
+    # One video left is thin whatever the clock says; three is not.
+    _fresh(tmp, "beat1b")
+    only_one = _video(status="published", youtube_id="solo", seo_title="Last one",
+                      published_at=(now + timedelta(days=2)).isoformat(timespec="seconds"))
+    _finished_upload(only_one, now)
+    message, alert = build(now)
+    check(alert and "1 video(s) left in the queue" in message,
+          "a queue down to one video is called thin even on a day that delivered")
 
     # The same queue, but nothing produced today: that is the alarm, on the day it happens.
     _fresh(tmp, "beat2")

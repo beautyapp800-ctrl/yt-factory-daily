@@ -32,9 +32,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core import db, failures
 
 DEFAULT_WINDOW_H = 24
-# Below this many days of scheduled video, the queue is worth mentioning even when today's
-# run was fine: it is the warning that one more bad day starts to show.
-THIN_QUEUE_DAYS = 2
+# Fewer than this many videos still scheduled is worth mentioning even on a day that went
+# well: it is the warning that one more bad day starts to show on the channel. Counted in
+# videos, not in days - at the normal three-day buffer the last slot is 2 days and 22 hours
+# away, and a threshold in whole days would have called that thin every single night. An
+# alert that fires nightly in normal operation is not an alert.
+THIN_QUEUE = 2
 
 
 def finished_since(since):
@@ -100,12 +103,12 @@ def build_report(now=None, window_h=DEFAULT_WINDOW_H, owner="", run_url="", chec
     waiting = db.scheduled_after(now)
     if waiting:
         last = waiting[-1]["when"]
-        days = (last - now).days
+        hours = (last - now).total_seconds() / 3600
         lines.append(f"- Queue: **{len(waiting)} video(s)** scheduled, the last on "
                      f"{last:%d.%m.%Y %H:%M UTC}. The channel goes quiet after that "
-                     f"unless a run finishes first (~{days} day(s) of cover).")
-        if days <= THIN_QUEUE_DAYS:
-            alerts.append(f"only {days} day(s) of queue left")
+                     f"unless a run finishes first ({hours / 24:.1f} days of cover).")
+        if len(waiting) < THIN_QUEUE:
+            alerts.append(f"only {len(waiting)} video(s) left in the queue")
     else:
         lines.append("- Queue: **empty**. Nothing is scheduled: the next day without a "
                      "finished video is a day with no video at all.")
