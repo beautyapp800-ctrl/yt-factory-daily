@@ -56,8 +56,15 @@ def decide(now=None):
 
 
 def main():
-    db.init_db()
-    run, reason = decide()
+    # Fails open on purpose. If this check cannot answer - a corrupt database, a schema it
+    # does not recognise - the wrong answer to give is "do nothing", because that is a silent
+    # dark day. The wrong answer in the other direction costs one run that turns out to be
+    # unnecessary, and the run itself will say so.
+    try:
+        db.init_db()
+        run, reason = decide()
+    except Exception as e:                                       # noqa: BLE001
+        run, reason = True, f"could not tell whether there is work ({e}); running anyway"
     print(f"run={'true' if run else 'false'}")
     print(f"reason={reason}")
     return 0
