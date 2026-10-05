@@ -260,6 +260,13 @@ def make_outline(concept, cfg, lesson_count, tics=""):
         if attempt == OUTLINE_ATTEMPTS and not fatal:
             log.warning("accepting the outline anyway: nothing left that is worth losing the "
                         "day's video over (%s)", "; ".join(complaints[:4]))
+            # Carried out of here so the stage can write it down. A relaxation nobody can see
+            # is indistinguishable from the rule not existing: the point of the escape hatch
+            # is that it is rare, and that can only be judged if every use of it is counted.
+            # One entry per distinct rule, not one per lesson: ten lessons
+            # breaking the same rule is one fact, and it has to fit in a line
+            # of an email and a column of the database.
+            outline["relaxed"] = sorted(dict.fromkeys(complaints))
             return outline
 
     raise RuntimeError("outline still breaks the title rules after "
@@ -735,6 +742,14 @@ def run(video_id, cfg):
     log.info("stage A: outline")
     outline = make_outline(concept, cfg, lesson_count, tics)
     log.info("title: %s", outline["title"])
+    if outline.get("relaxed"):
+        # On the video's own row, not only in the log: the run email and the weekly report
+        # both have to be able to say which videos went out this way, and how often.
+        relaxed = "; ".join(outline["relaxed"])
+        db.update_video(video_id, relaxed=relaxed)
+        db.log_event(video_id, "script", "warning",
+                     f"outline accepted without passing every rule: {relaxed}")
+        log.warning("video %s goes into production with a relaxed outline", video_id)
 
     # One distinct setting per part, so ten lessons do not share a kitchen.
     pool = random.sample(SCENE_SETTINGS, min(len(SCENE_SETTINGS), lesson_count + 1))

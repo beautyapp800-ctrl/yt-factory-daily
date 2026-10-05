@@ -540,6 +540,35 @@ def test_every_failure_has_an_action_or_heals_itself():
           "an unrecognised failure says so, rather than being silently mis-sorted")
 
 
+def test_a_relaxed_plan_is_named_in_the_mail_and_counted_in_the_week(tmp):
+    print("test_a_relaxed_plan_is_named_in_the_mail_and_counted_in_the_week")
+    _fresh(tmp, "relaxed")
+    rules = '"A Nine Word Lesson Title Like This One Here" is 9 words, needs 4 to 8'
+    vid = _video(status="published", youtube_id="abc", title="Working", seo_title="Relaxed one",
+                 duration_s=1790.0, attempts=1, relaxed=rules,
+                 published_at="2026-10-13T18:00:00Z")
+    message = notify.build_message("success", db.get_video(vid), [], "url", "owner", NOW)
+    check("relaxed plan" in message.lower(), "the run mail says the plan was relaxed")
+    check("9 words" in message, "and names the rule it was let through without")
+
+    plain = _video(status="published", youtube_id="def", title="Clean", attempts=1)
+    check("relaxed" not in notify.build_message(
+        "success", db.get_video(plain), [], "url", "owner", NOW).lower(),
+        "a video whose plan passed says nothing about it")
+
+    # One in ten is the valve working. Two is the report saying so without being asked.
+    report, _ = weekly.build_report(NOW, "owner")
+    check("1 of the last 2" in report, "the weekly report counts how often the valve was used")
+    check("the relaxed-plan valve" not in report, "one use is not an alarm")
+
+    _video(status="published", youtube_id="ghi", title="Second relaxed", attempts=1,
+           relaxed=rules)
+    report, _ = weekly.build_report(NOW, "owner")
+    check("the relaxed-plan valve is being used too often" in report,
+          "two in ten is reported as a hole, in the report's own headline")
+    check("This is above the line" in report, "and explained rather than left as a number")
+
+
 if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
@@ -565,4 +594,5 @@ if __name__ == "__main__":
         test_the_second_cron_only_works_when_the_first_one_did_not(tmp)
         test_the_heartbeat_speaks_the_day_the_queue_stops_growing(tmp)
         test_every_failure_has_an_action_or_heals_itself()
+        test_a_relaxed_plan_is_named_in_the_mail_and_counted_in_the_week(tmp)
     print("ALL CI TESTS PASSED")

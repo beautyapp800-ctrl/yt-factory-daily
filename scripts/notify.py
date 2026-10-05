@@ -84,6 +84,23 @@ def format_when(iso):
     return when.astimezone(timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
 
 
+def relaxed_line(video):
+    """Names the rules a plan was let through without, when it was let through at all.
+
+    The outline stage may accept a plan on its last attempt rather than lose the day's video
+    over a blemish. That is a safety valve, and a safety valve nobody can see is the same
+    thing as the rule not being there: every use of it is named here, and the weekly report
+    counts how often it happens.
+    """
+    relaxed = (video or {}).get("relaxed")
+    if not relaxed:
+        return ""
+    return (f"- **Went out with a relaxed plan**, after three attempts could not satisfy: "
+            f"`{relaxed[:400]}`. Nothing here is a banned word or a copied title - those "
+            f"still stop a video. Worth watching: if this starts arriving often, the rule "
+            f"and the prompt disagree somewhere and the valve is covering for it.\n")
+
+
 def queue_line(now=None):
     """How much the channel has left to show. The one number worth reading in a hurry:
     a failed run matters very differently with six days of queue than with none."""
@@ -140,7 +157,8 @@ def build_message(outcome, video, events, run_url, owner="", now=None):
                 f"- Link: {url}\n"
                 f"- YouTube makes it public: **{format_when(video.get('published_at'))}**\n"
                 f"- Length: {round((video.get('duration_s') or 0) / 60, 1)} min\n"
-                f"- Attempts: {attempts}{spent}\n\n"
+                f"- Attempts: {attempts}{spent}\n"
+                f"{relaxed_line(video)}\n"
                 f"Run: {run_url}\n")
 
     stage, message = split_error(video.get("error"))

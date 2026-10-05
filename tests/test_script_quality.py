@@ -195,10 +195,54 @@ def test_clean_spaces_punctuation_without_corrupting_it():
     check(not any(ord(c) < 32 for c in out), "and nothing unprintable is inserted")
 
 
+def test_a_relaxed_plan_is_written_down_not_waved_through():
+    """The escape hatch may not be invisible: a video that went out without passing every
+    rule has to be countable afterwards, or the rule has quietly stopped existing."""
+    print("test_a_relaxed_plan_is_written_down_not_waved_through")
+    nine_words = "Stop Waiting For The Call That Never Quite Arrives"
+    plan = {"title": "10 Things To Stop Waiting For",
+            "lessons": [{"title": nine_words, "focus": "About the phone and the feed."}
+                        for _ in range(10)]}
+    calls = []
+
+    def fake_model(prompt, **kw):
+        calls.append(prompt)
+        import copy
+        return copy.deepcopy(plan)
+
+    real = sc.complete_json
+    sc.complete_json = fake_model
+    try:
+        outline = sc.make_outline({"topic": "waiting", "promise": "p", "different": "d",
+                                   "seed": "patience"}, {"target_duration_min": 30}, 10)
+    finally:
+        sc.complete_json = real
+
+    check(len(calls) == sc.OUTLINE_ATTEMPTS,
+          f"all {sc.OUTLINE_ATTEMPTS} attempts are spent before anything is let through")
+    check(outline.get("relaxed"), "and what it was let through without is carried out")
+    check(any("9 words" in c for c in outline["relaxed"]),
+          f"naming the actual rule, not just 'relaxed' ({outline['relaxed'][:2]})")
+
+    # A banned word is still fatal, however many attempts it survives.
+    plan["lessons"] = [{"title": "Ten Tips To Fix Your Morning", "focus": "About work."}
+                       for _ in range(10)]
+    sc.complete_json = fake_model
+    try:
+        sc.make_outline({"topic": "t", "promise": "p", "different": "d", "seed": "habit"},
+                        {"target_duration_min": 30}, 10)
+        check(False, "a banned word should still throw the video away")
+    except RuntimeError as e:
+        check("banned word" in str(e), f"and says which word did it ({e})")
+    finally:
+        sc.complete_json = real
+
+
 if __name__ == "__main__":
     for test in (test_title_ban, test_trimming, test_trim_to_budget,
                  test_hook_preview_detector, test_duplicate_openings,
                  test_domain_diversity, test_seed_domain_is_not_held_against_the_plan,
+                 test_a_relaxed_plan_is_written_down_not_waved_through,
                  test_forbidden_opening_prefixes,
                  test_name_tics, test_outro_target,
                  test_clean_spaces_punctuation_without_corrupting_it):

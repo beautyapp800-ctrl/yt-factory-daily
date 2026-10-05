@@ -37,6 +37,13 @@ from core import db
 QUEUE_WARN, QUEUE_ALARM = 3, 1
 DAILY_FREE_NEURONS = 10000
 
+# The outline stage may let a plan through on its last attempt rather than lose the day's
+# video over a blemish. One in ten is a safety valve. More than that and it is not catching
+# rare bad luck any more - the rule and the prompt disagree somewhere, and the valve is
+# quietly holding a leak open. RELAXED_WINDOW is how many recent videos the share is taken
+# over; RELAXED_LIMIT is how many of them may have used it before this report says so.
+RELAXED_WINDOW, RELAXED_LIMIT = 10, 1
+
 
 def _rows(sql, params=()):
     with closing(sqlite3.connect(db.DB_PATH)) as conn:
@@ -59,6 +66,17 @@ def queued_ahead(now):
         if when and when > now:
             out.append((when, v.get("seo_title") or v.get("title") or f"video {v['id']}"))
     return sorted(out)
+
+
+def relaxed_recently(window=RELAXED_WINDOW):
+    """([(id, title, rules)], videos_examined) for the last `window` videos that got as far
+    as having a plan at all. Videos that died before the outline are not counted either
+    way: they never reached the decision."""
+    rows = _rows("SELECT id, seo_title, title, relaxed FROM videos "
+                 "WHERE title IS NOT NULL AND title != '' ORDER BY id DESC LIMIT ?", (window,))
+    relaxed = [(r["id"], r.get("seo_title") or r.get("title"), r["relaxed"])
+               for r in rows if (r.get("relaxed") or "").strip()]
+    return relaxed, len(rows)
 
 
 def failures_since(since):
@@ -110,9 +128,14 @@ def build_report(now, owner="", run_url="", probe=(None, "not run")):
                                   (week_ago.isoformat(timespec="seconds"),))]
     failed = failures_since(week_ago)
     spent = neurons_logged_since(now - timedelta(days=1))
+    relaxed, examined = relaxed_recently()
+    valve_leaking = len(relaxed) > RELAXED_LIMIT
 
     if len(queue) < QUEUE_ALARM:
         level = "ALARM: no video is queued ahead"
+    elif valve_leaking:
+        level = (f"the relaxed-plan valve is being used too often "
+                 f"({len(relaxed)} of the last {examined})")
     elif len(queue) < QUEUE_WARN:
         level = f"warning: only {len(queue)} video(s) queued ahead"
     else:
@@ -132,6 +155,20 @@ def build_report(now, owner="", run_url="", probe=(None, "not run")):
               f"**Failed runs in the last 7 days: {len(failed)}**"]
     for e in failed[:8]:
         lines.append(f"- video {e['video_id']}, stage `{e['stage']}`: {(e['message'] or '')[:200]}")
+
+    lines += ["", f"**Plans let through without passing every rule: {len(relaxed)} of the "
+              f"last {examined}** (a safety valve, not a standard; above {RELAXED_LIMIT} in "
+              f"{RELAXED_WINDOW} it is a hole)"]
+    for vid, vtitle, rules in relaxed:
+        lines.append(f"- video {vid}, {(vtitle or '')[:50]}: {(rules or '')[:160]}")
+    if not relaxed:
+        lines.append("- none: every plan passed on its own")
+    elif valve_leaking:
+        lines.append(f"- **This is above the line.** The valve exists so a blemish cannot "
+                     f"cost a day's video, and at this rate it is no longer catching rare "
+                     f"bad luck: a rule and the prompt that is meant to satisfy it disagree. "
+                     f"Worth reading the rules listed above - they will mostly be the same "
+                     f"one - and fixing that side rather than widening the valve.")
 
     lines += ["", "**Cloudflare**",
               f"- Neurons our own runs logged in the last 24 h: **{spent}** of "

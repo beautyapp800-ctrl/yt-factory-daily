@@ -63,7 +63,7 @@ CREATE TABLE IF NOT EXISTS events (
 
 _VIDEO_FIELDS = {"topic", "title", "status", "duration_s", "video_path",
                  "thumbnail_path", "youtube_id", "published_at", "error", "seed",
-                 "seo_title", "description", "tags", "attempts"}
+                 "seo_title", "description", "tags", "attempts", "relaxed"}
 
 # How many times a run may try one video before it is left alone and a new one is started.
 # One number, used by run.py, the CI state script and the notification text, so they cannot
@@ -75,7 +75,11 @@ MAX_ATTEMPTS = 3
 # (the seo stage writes it, upload prefers it). `tags` is a JSON list.
 _MIGRATIONS = [("videos", "seed", "TEXT"), ("videos", "seo_title", "TEXT"),
                ("videos", "description", "TEXT"), ("videos", "tags", "TEXT"),
-               ("videos", "attempts", "INTEGER DEFAULT 0")]
+               ("videos", "attempts", "INTEGER DEFAULT 0"),
+               # Empty for a video whose plan passed every rule. Otherwise the rules it was
+               # let through without, so the escape hatch in make_outline can be counted
+               # rather than taken on trust.
+               ("videos", "relaxed", "TEXT")]
 
 
 def _now():
