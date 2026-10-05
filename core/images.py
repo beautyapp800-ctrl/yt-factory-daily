@@ -21,6 +21,7 @@ only knows how to ask each provider for one image and say plainly when that fail
 """
 import base64
 import json
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -56,6 +57,23 @@ class ImageError(Exception):
 
 
 # --- cloudflare --------------------------------------------------------------
+
+CLOUDFLARE_ATTEMPTS = 3
+CLOUDFLARE_RETRY_DELAY_S = 4
+
+# What a second attempt could plausibly fix: the service being briefly unreachable or
+# overloaded. Everything else - a bad token, a spent daily allowance, a prompt the model
+# refuses - answers identically however long it is asked for, so retrying only burns time.
+_WORTH_RETRYING = re.compile(
+    r"\b5\d\d\b|network error|timed? ?out|timeout|connection (reset|refused|aborted)|"
+    r"non-json|decoded to only", re.I)
+_NOT_WORTH_RETRYING = re.compile(r"auth rejected|not set in \.env|quota|limit", re.I)
+
+
+def _worth_asking_again(error):
+    text = str(error)
+    return bool(_WORTH_RETRYING.search(text)) and not _NOT_WORTH_RETRYING.search(text)
+
 
 def cloudflare_available():
     return bool(get_key("CLOUDFLARE_ACCOUNT_ID")) and bool(get_key("CLOUDFLARE_API_TOKEN"))
@@ -234,12 +252,24 @@ def synthesize(prompt, out_path, seed, cfg):
     last_error = None
 
     if try_cloudflare and cloudflare_available():
-        try:
-            _, neurons = synthesize_cloudflare(prompt, out_path, seed, cfg)
-            return "cloudflare", neurons
-        except ImageError as e:
-            last_error = e
-            log.warning("cloudflare failed: %s", e)
+        for attempt in range(1, CLOUDFLARE_ATTEMPTS + 1):
+            try:
+                _, neurons = synthesize_cloudflare(prompt, out_path, seed, cfg)
+                return "cloudflare", neurons
+            except ImageError as e:
+                last_error = e
+                # A timeout or a 502 is the service having a bad second, and the frame it
+                # cost would otherwise fall through to the weaker provider - or be a copy of
+                # the frame before it - for no reason. A rejected token or a spent allowance
+                # will say the same thing however many times it is asked, so those are not
+                # retried: the waiting would be the only result.
+                if attempt < CLOUDFLARE_ATTEMPTS and _worth_asking_again(e):
+                    log.warning("cloudflare attempt %d/%d failed, retrying: %s",
+                                attempt, CLOUDFLARE_ATTEMPTS, e)
+                    time.sleep(CLOUDFLARE_RETRY_DELAY_S * attempt)
+                    continue
+                log.warning("cloudflare failed: %s", e)
+                break
     elif try_cloudflare:
         log.warning("cloudflare unavailable (CLOUDFLARE_ACCOUNT_ID/"
                     "CLOUDFLARE_API_TOKEN not set)%s", "; trying pollinations"

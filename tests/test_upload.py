@@ -208,6 +208,51 @@ def test_a_scheduled_video_goes_up_private_for_the_right_moment(tmp):
           "with scheduling off there is no publishAt at all")
 
 
+def test_the_slot_follows_the_queue_not_the_clock(tmp):
+    """Every scheduled run of this repository so far started 2h55 to 5h44 after its cron,
+    so nothing a viewer sees may depend on what time the runner woke up."""
+    print("test_the_slot_follows_the_queue_not_the_clock")
+    from datetime import datetime, timedelta, timezone as tz
+    taken = datetime(2026, 10, 7, 18, 0, tzinfo=tz.utc)        # the slot the queue ends on
+
+    on_time = up.publish_at(SCHEDULED, datetime(2026, 10, 5, 1, 17, tzinfo=tz.utc), taken)
+    six_hours_late = up.publish_at(SCHEDULED, datetime(2026, 10, 5, 7, 1, tzinfo=tz.utc), taken)
+    check(on_time == six_hours_late == "2026-10-08T18:00:00Z",
+          f"the cron hour and six hours later book the same slot ({on_time})")
+
+    # A run dragged past local midnight: 5 Oct 23:40 UTC is already 6 Oct in Kyiv.
+    past_midnight = up.publish_at(SCHEDULED, datetime(2026, 10, 5, 23, 40, tzinfo=tz.utc), taken)
+    check(past_midnight == "2026-10-08T18:00:00Z",
+          f"and so does a run that slips over local midnight ({past_midnight}) - under "
+          f"'now + 3 days' that one would have skipped a day and left the channel empty")
+
+    # Two runs in one day (the second cron catching a dropped first one) must not collide.
+    second = up.publish_at(SCHEDULED, datetime(2026, 10, 5, 7, 1, tzinfo=tz.utc),
+                           datetime.fromisoformat(on_time.replace("Z", "+00:00")))
+    check(second == "2026-10-09T18:00:00Z",
+          f"a second run the same day takes the next day's slot, not the same minute ({second})")
+
+    # A day lost: the queue ends tomorrow, and the buffer is spent rather than a gap left.
+    thin = up.publish_at(SCHEDULED, datetime(2026, 10, 5, 7, 1, tzinfo=tz.utc),
+                         datetime(2026, 10, 6, 18, 0, tzinfo=tz.utc))
+    check(thin == "2026-10-07T18:00:00Z",
+          f"with a thin queue the next video goes out the very next day ({thin})")
+
+    # Queue exhausted: nothing left to follow, so the configured buffer is rebuilt.
+    stale = up.publish_at(SCHEDULED, datetime(2026, 10, 5, 7, 1, tzinfo=tz.utc),
+                          datetime(2026, 9, 20, 18, 0, tzinfo=tz.utc))
+    check(stale == "2026-10-08T18:00:00Z",
+          f"an exhausted queue starts the buffer again, not in the past ({stale})")
+
+    # Never within half an hour of now, whatever the queue says.
+    hour = up.publish_at({**SCHEDULED, "publish_time": "10:10"},
+                         datetime(2026, 10, 5, 7, 1, tzinfo=tz.utc),
+                         datetime(2026, 10, 4, 7, 10, tzinfo=tz.utc))
+    when = datetime.fromisoformat(hour.replace("Z", "+00:00"))
+    check(when > datetime(2026, 10, 5, 7, 1, tzinfo=tz.utc) + timedelta(minutes=30),
+          f"a slot is never close enough to now for YouTube to read it as past ({hour})")
+
+
 def test_the_two_flags_cannot_be_switched_off(tmp):
     print("test_the_two_flags_cannot_be_switched_off")
     for cfg in (CFG, {**CFG, "youtube": {"made_for_kids": True, "contains_synthetic_media": False,
@@ -539,8 +584,12 @@ def test_failed_publish_returns_the_video_to_the_queue(tmp):
 if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
+        # build_body asks the database where the queue ends, so no test may see the real one.
+        db.DB_PATH = tmp / "upload_tests.db"
+        db.init_db()
         test_body_has_what_was_asked_for(tmp)
         test_a_scheduled_video_goes_up_private_for_the_right_moment(tmp)
+        test_the_slot_follows_the_queue_not_the_clock(tmp)
         test_the_two_flags_cannot_be_switched_off(tmp)
         test_metadata_problems_are_found_before_uploading(tmp)
         test_retries_resume_and_succeed(tmp)

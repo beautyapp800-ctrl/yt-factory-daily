@@ -260,6 +260,50 @@ def oldest_ready():
         return dict(row) if row else None
 
 
+def last_scheduled_publish():
+    """The latest publishAt already handed to YouTube, as an aware datetime, or None.
+
+    This is the end of the queue, and the next video is scheduled one day after it. The
+    times are parsed rather than compared as text because two formats are in the column -
+    '...+00:00' from early uploads and '...Z' from YouTube's own reply - and those do not
+    sort against each other.
+    """
+    latest = None
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT published_at FROM videos WHERE published_at IS NOT NULL "
+            "AND published_at != '' AND youtube_id IS NOT NULL AND youtube_id != ''").fetchall()
+    for row in rows:
+        try:
+            when = datetime.fromisoformat(str(row[0]).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            continue
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        if latest is None or when > latest:
+            latest = when
+    return latest
+
+
+def scheduled_after(moment):
+    """Videos whose publishAt is still ahead of `moment`: what the channel has left to show."""
+    rows = []
+    with _connect() as conn:
+        for row in conn.execute(
+                "SELECT id, seo_title, title, youtube_id, published_at FROM videos "
+                "WHERE published_at IS NOT NULL AND published_at != '' "
+                "AND youtube_id IS NOT NULL AND youtube_id != ''"):
+            try:
+                when = datetime.fromisoformat(str(row["published_at"]).replace("Z", "+00:00"))
+            except (TypeError, ValueError):
+                continue
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=timezone.utc)
+            if when > moment:
+                rows.append({**dict(row), "when": when})
+    return sorted(rows, key=lambda r: r["when"])
+
+
 def count_ready():
     with _connect() as conn:
         return conn.execute(

@@ -21,6 +21,8 @@ core.logger.LOG_DIR = Path(tempfile.mkdtemp(prefix="yt-factory-test-"))
 from core import config, db
 import run
 import ci_state
+import ci_should_run
+import heartbeat
 import notify
 import weekly_report as weekly
 
@@ -414,6 +416,118 @@ def test_the_weekly_report_lists_failures_and_the_neurons_we_logged(tmp):
     check("lower bound" in text, "and the report says the neuron figure is a lower bound")
 
 
+# --- not running at all, which is the failure nothing else can see ------------------------
+
+def _finished_upload(vid, when):
+    """Mark a video's upload stage as finished at a given moment, the way run.py does."""
+    with closing(sqlite3.connect(db.DB_PATH)) as conn:
+        conn.execute("INSERT INTO events (video_id, stage, level, message, created_at) "
+                     "VALUES (?, 'upload', 'info', 'stage finished', ?)",
+                     (vid, when.isoformat(timespec="seconds")))
+        conn.commit()
+
+
+def test_the_second_cron_only_works_when_the_first_one_did_not(tmp):
+    print("test_the_second_cron_only_works_when_the_first_one_did_not")
+    _fresh(tmp, "guard")
+    now = datetime.now(timezone.utc)
+
+    run_it, reason = ci_should_run.decide(now)
+    check(run_it and "nothing has been finished" in reason,
+          f"an empty day is a day to work ({reason})")
+
+    vid = _video(status="published", youtube_id="abc", attempts=1)
+    _finished_upload(vid, now)
+    run_it, reason = ci_should_run.decide(now)
+    check(not run_it, f"with today's video already delivered the second cron stands down ({reason})")
+
+    # Yesterday's delivery is not today's: the schedule must not skip a day on the strength of it.
+    _fresh(tmp, "guard2")
+    old = _video(status="published", youtube_id="abc", attempts=1)
+    _finished_upload(old, now - timedelta(days=1))
+    run_it, _ = ci_should_run.decide(now)
+    check(run_it, "yesterday's video does not excuse today")
+
+    # A half-built video outranks everything: resuming is what keeps the paid-for work.
+    _fresh(tmp, "guard3")
+    done = _video(status="published", youtube_id="abc", attempts=1)
+    _finished_upload(done, now)
+    _video(status="failed", attempts=1)
+    run_it, reason = ci_should_run.decide(now)
+    check(run_it and "unfinished" in reason,
+          f"an unfinished video is picked up even on a day that already delivered ({reason})")
+
+
+def test_the_heartbeat_speaks_the_day_the_queue_stops_growing(tmp):
+    print("test_the_heartbeat_speaks_the_day_the_queue_stops_growing")
+    _fresh(tmp, "beat")
+    now = datetime.now(timezone.utc)
+
+    # A good day: something was finished, and there is cover ahead.
+    vid = _video(status="published", youtube_id="abc", seo_title="Today's video",
+                 published_at=(now + timedelta(days=3)).isoformat(timespec="seconds"))
+    _finished_upload(vid, now)
+    for extra in (4, 5):
+        _video(status="published", youtube_id=f"x{extra}", seo_title=f"In {extra}",
+               published_at=(now + timedelta(days=extra)).isoformat(timespec="seconds"))
+    message, alert = build(now)
+    check(not alert, "a day that produced a video and has cover raises nothing")
+    check("Today's video" in message, "and names what was added")
+
+    # The same queue, but nothing produced today: that is the alarm, on the day it happens.
+    _fresh(tmp, "beat2")
+    for extra in (3, 4):
+        _video(status="published", youtube_id=f"y{extra}",
+               published_at=(now + timedelta(days=extra)).isoformat(timespec="seconds"))
+    db.log_event(_video(status="failed"), "script", "error", "outline still breaks the rules")
+    message, alert = build(now)
+    check(alert, "no new video in the window is an alert the same day")
+    check("No new video reached the queue" in message, "and says so plainly")
+    check("What to do" in message and "writes a fresh one" in message,
+          "with the action for the failure that caused it, not a link to a log")
+
+    # Nothing ran at all: a dropped cron, which the daily workflow itself can never report.
+    _fresh(tmp, "beat3")
+    _video(status="published", youtube_id="z",
+           published_at=(now + timedelta(days=2)).isoformat(timespec="seconds"))
+    message, alert = build(now)
+    check(alert and "Nothing ran in the last" in message,
+          "a schedule that never fired is reported as the schedule failing")
+
+    # An empty queue is the loudest case: the next bad day is a day with no video.
+    _fresh(tmp, "beat4")
+    message, alert = build(now)
+    check(alert and "Queue: **empty**" in message, "an empty queue is called empty")
+
+
+def build(now):
+    """The heartbeat report, without the network check, at a fixed moment."""
+    return heartbeat.build_report(now=now, check_token=False)
+
+
+def test_every_failure_has_an_action_or_heals_itself():
+    print("test_every_failure_has_an_action_or_heals_itself")
+    from core import failures
+    seen = [
+        ("images", "cloudflare HTTP 429: quota exceeded", "cloudflare-quota", True),
+        ("upload", "HttpError 403 uploadLimitExceeded", "youtube-upload-quota", True),
+        ("preflight", "the YouTube token does not work: invalid_grant", "youtube-auth", False),
+        ("preflight", "secrets not set in this workflow: GROQ_API_KEY", "secret-missing", False),
+        ("tts", "edge-tts cannot speak from this machine: 403", "tts-blocked", False),
+        ("script", "outline still breaks the title rules", "script-quality", True),
+        ("render", "ffmpeg exited with 1", "render", False),
+        ("upload", "cloudflare network error: timed out", "service-down", True),
+    ]
+    for stage, message, expected, heals in seen:
+        kind, self_healing, action = failures.classify(stage, message)
+        check(kind == expected, f"{message[:38]!r} is a {expected}")
+        check(self_healing is heals, f"and {'heals itself' if heals else 'needs a person'}")
+        check(len(action) > 40, "and carries a sentence of instruction, not a shrug")
+    kind, _, action = failures.classify("thumbnail", "something nobody has seen")
+    check(kind == "unknown" and "core/failures.py" in action,
+          "an unrecognised failure says so, rather than being silently mis-sorted")
+
+
 if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
@@ -436,4 +550,7 @@ if __name__ == "__main__":
         test_a_video_nobody_means_to_publish_can_be_retired(tmp)
         test_the_weekly_report_counts_the_queue_and_alarms_on_empty(tmp)
         test_the_weekly_report_lists_failures_and_the_neurons_we_logged(tmp)
+        test_the_second_cron_only_works_when_the_first_one_did_not(tmp)
+        test_the_heartbeat_speaks_the_day_the_queue_stops_growing(tmp)
+        test_every_failure_has_an_action_or_heals_itself()
     print("ALL CI TESTS PASSED")

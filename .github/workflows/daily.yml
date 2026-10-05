@@ -15,7 +15,13 @@ name: daily
 
 on:
   schedule:
+    # Two chances a day, not one. GitHub starts a scheduled job when it has runners free, not
+    # when the cron says: every scheduled run of this repository so far began between 2h55 and
+    # 5h44 after its time, and GitHub's own documentation says a run may be dropped entirely
+    # when the load is high enough. The second cron costs nothing on the days the first worked
+    # - the guard job below sees the finished video and stops - and rescues the days it did not.
     - cron: "17 1 * * *"          # 01:17 UTC. Off the hour on purpose: :00 is when everyone's cron fires.
+    - cron: "43 10 * * *"         # 10:43 UTC, far enough after the first to know how it ended.
   workflow_dispatch:
 
 concurrency:
@@ -27,7 +33,26 @@ permissions:
   issues: write                   # the run summary is posted as an issue comment, which is the email
 
 jobs:
+  # Does this run have anything to do? Asked before the five-hour job is allowed to start, so
+  # the second cron is free on the days the first one already delivered.
+  decide:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.guard.outputs.run }}
+      reason: ${{ steps.guard.outputs.reason }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - id: guard
+        run: python scripts/ci_should_run.py | tee -a "$GITHUB_OUTPUT"
+      - run: echo "${{ steps.guard.outputs.reason }}" >> "$GITHUB_STEP_SUMMARY"
+
   produce:
+    needs: decide
+    if: needs.decide.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 300          # 5 hours for the whole job
     env:
@@ -133,11 +158,23 @@ jobs:
           git add data/factory.db
           if git diff --cached --quiet; then
             echo "database unchanged"
-          else
-            git commit -m "State after run ${{ github.run_id }} (${{ steps.run.outcome }})"
-            git pull --rebase --autostash origin "${{ github.ref_name }}"
-            git push origin "HEAD:${{ github.ref_name }}"
+            exit 0
           fi
+          git commit -m "State after run ${{ github.run_id }} (${{ steps.run.outcome }})"
+          # The database IS the memory: which video exists, which stages finished, what is
+          # scheduled on YouTube. A push lost to a race would make the next run repeat work
+          # that was already paid for, so it is retried rather than left to chance.
+          for attempt in 1 2 3 4 5; do
+            git pull --rebase --autostash origin "${{ github.ref_name }}" || true
+            if git push origin "HEAD:${{ github.ref_name }}"; then
+              echo "database pushed on attempt $attempt"
+              exit 0
+            fi
+            echo "push attempt $attempt failed, retrying in $((attempt * 10))s"
+            sleep $((attempt * 10))
+          done
+          echo "::error::the database could not be pushed after 5 attempts; the next run will"               " repeat this video's finished stages"
+          exit 1
 
       - name: Post the run summary (this is the email)
         if: always()

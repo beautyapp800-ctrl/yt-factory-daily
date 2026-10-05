@@ -50,3 +50,7 @@ docs/*.png
 docs/*.jpg
 docs/*.jpeg
 docs/oauth-and-upload-evidence.pdf
+
+# The preflight leaves its findings here for the step that writes the email; it is a
+# per-run artifact, not state.
+preflight-problems.txt

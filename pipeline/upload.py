@@ -54,6 +54,11 @@ CATEGORY_ID = "22"               # People & Blogs
 DEFAULT_PUBLISH_TIME = "21:00"   # local, config.publish_time
 DEFAULT_PUBLISH_TIMEZONE = "Europe/Kiev"
 DEFAULT_DAYS_AHEAD = 3
+# How close to now a slot may be once the queue is driving the choice. One day, so a video
+# always has a night of YouTube processing behind it before anyone is sent to it, and a run
+# that arrives six hours late still books the same evening as one that arrived on time.
+MIN_LEAD_DAYS = 1
+MIN_LEAD_MINUTES = 30            # and never a slot YouTube would read as already past
 DEFAULT_LANGUAGE = "en"
 PRIVACY = ("private", "unlisted", "public")
 DEFAULT_CHUNK_MB = 8             # must be a multiple of 256 KiB; 8 MiB is
@@ -78,13 +83,22 @@ class UploadError(Exception):
 
 # --- what is sent ----------------------------------------------------------------
 
-def publish_at(cfg, now=None):
+def publish_at(cfg, now=None, last_scheduled=None):
     """When YouTube should make this video public, as RFC 3339 UTC.
 
-    config.publish_time local time, config.publish_days_ahead days from now. The queue of
-    finished videos lives on YouTube rather than on disk, because the runner is disposable
-    and seven 300 MB files cannot be carried between runs; scheduling three days out means
-    three days of failed runs change nothing a viewer sees.
+    The slot is the day after the last slot already taken - not a fixed distance from the
+    moment this run happens to be executing. That distinction is the whole point: GitHub's
+    free runners start scheduled jobs when they have room, and every scheduled run of this
+    repository so far has started between 2h55 and 5h44 after its cron. A run that slips past
+    local midnight would, under "now + 3 days", book the slot a day later than the one before
+    it asked for - a hole on the channel - and two runs on the same day would book the same
+    minute twice. Counting from the queue instead, the slots are strictly one a day whatever
+    time the runner wakes up, and a day lost to a failure costs buffer rather than leaving a
+    gap: the videos after it keep going out daily.
+
+    `last_scheduled` is the latest publishAt already handed to YouTube (db.last_scheduled_
+    publish()). With no queue at all - the first video ever, or after a long outage - the slot
+    is config.publish_days_ahead out, which is what builds the buffer back up.
 
     The conversion is done through the real zone, not a fixed offset: Kyiv is UTC+3 in
     summer and UTC+2 in winter, so 21:00 local is 18:00Z for part of the year and 19:00Z for
@@ -94,9 +108,27 @@ def publish_at(cfg, now=None):
     hour, _, minute = (cfg.get("publish_time") or DEFAULT_PUBLISH_TIME).partition(":")
     days = int(cfg.get("publish_days_ahead", DEFAULT_DAYS_AHEAD))
     local = (now or datetime.now(timezone.utc)).astimezone(zone)
-    when = (local + timedelta(days=days)).replace(hour=int(hour), minute=int(minute or 0),
-                                                  second=0, microsecond=0)
-    if when <= local:
+
+    def at_publish_time(moment):
+        return moment.replace(hour=int(hour), minute=int(minute or 0), second=0, microsecond=0)
+
+    # The buffer the configuration asks for, measured from today.
+    when = at_publish_time(local + timedelta(days=days))
+
+    if last_scheduled is not None:
+        if isinstance(last_scheduled, str):
+            last_scheduled = datetime.fromisoformat(last_scheduled.replace("Z", "+00:00"))
+        last_local = last_scheduled.astimezone(zone)
+        # A queue that ran dry longer ago than the buffer itself is not a queue any more:
+        # the channel is already out of rhythm, so the buffer is built again from today
+        # rather than chased. Otherwise the next free slot is taken, which keeps the videos
+        # one a day and spends buffer - not continuity - on a day that was lost.
+        if last_local >= local - timedelta(days=days):
+            after_queue = at_publish_time(last_local + timedelta(days=1))
+            floor = at_publish_time(local + timedelta(days=MIN_LEAD_DAYS))
+            when = max(after_queue, floor)
+
+    while when <= local + timedelta(minutes=MIN_LEAD_MINUTES):
         when += timedelta(days=1)
     return when.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
@@ -119,7 +151,7 @@ def build_body(video, cfg, now=None):
         # publishAt. Asking for public AND a schedule is rejected, so privacy is forced here
         # rather than left to trip the upload.
         status["privacyStatus"] = "private"
-        status["publishAt"] = publish_at(cfg, now)
+        status["publishAt"] = publish_at(cfg, now, last_scheduled=db.last_scheduled_publish())
     return {
         "snippet": {
             "title": video.get("seo_title") or video.get("title") or "",

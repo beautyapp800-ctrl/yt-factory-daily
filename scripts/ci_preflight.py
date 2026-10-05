@@ -28,6 +28,9 @@ from core.llm import get_key
 
 REQUIRED = ["GROQ_API_KEY", "CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_API_TOKEN", "YOUTUBE_TOKEN_JSON"]
 
+# Where the findings are left for the step that writes the email. Empty file = all checks passed.
+PROBLEMS_PATH = Path(__file__).resolve().parent.parent / "preflight-problems.txt"
+
 
 def main():
     problems = []
@@ -64,6 +67,14 @@ def main():
     except Exception as e:                                       # noqa: BLE001
         print(f"youtube token: FAILED: {e}")
         problems.append(f"the YouTube token does not work: {e}")
+
+    # The email is written by a later step, after this process has exited, and a workflow log
+    # is not something the owner should have to open. Leaving the findings on disk is what
+    # lets notify.py say which check failed instead of listing everything it could have been.
+    try:
+        PROBLEMS_PATH.write_text("\n".join(problems), encoding="utf-8")
+    except OSError as e:                                         # noqa: BLE001
+        print(f"(could not write {PROBLEMS_PATH}: {e})")
 
     if problems:
         print("\nPREFLIGHT FAILED:")

@@ -24,9 +24,20 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from core import db
+from core import db, failures
 
 MAX_ATTEMPTS = db.MAX_ATTEMPTS
+PREFLIGHT_PROBLEMS = Path(__file__).resolve().parent.parent / "preflight-problems.txt"
+
+
+def preflight_problems(path=None):
+    """What the preflight step found, if it left anything. Empty when it passed or never ran."""
+    path = Path(path or PREFLIGHT_PROBLEMS)
+    try:
+        return [line.strip() for line in path.read_text(encoding="utf-8").splitlines()
+                if line.strip()]
+    except OSError:
+        return []
 
 
 def latest_video():
@@ -73,6 +84,24 @@ def format_when(iso):
     return when.astimezone(timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
 
 
+def queue_line(now=None):
+    """How much the channel has left to show. The one number worth reading in a hurry:
+    a failed run matters very differently with six days of queue than with none."""
+    now = now or datetime.now(timezone.utc)
+    try:
+        waiting = db.scheduled_after(now)
+    except Exception:                                            # noqa: BLE001
+        return ""
+    if not waiting:
+        return ("- Queue: **empty - the channel has nothing scheduled**, so the next day "
+                "without a finished video is a day with no video\n\n")
+    last = waiting[-1]["when"]
+    days = (last - now).days
+    return (f"- Queue: **{len(waiting)} video(s)** still to go out, the last on "
+            f"{last.astimezone(timezone.utc):%d.%m.%Y %H:%M UTC} "
+            f"(~{days} day(s) of cover)\n\n")
+
+
 def build_message(outcome, video, events, run_url, owner="", now=None):
     mention = f"@{owner} " if owner else ""
     stamp = (now or datetime.now(timezone.utc)).strftime("%d.%m.%Y %H:%M UTC")
@@ -80,6 +109,15 @@ def build_message(outcome, video, events, run_url, owner="", now=None):
     if outcome == "not-started":
         # The preflight failed, so no stage ran and the newest video in the database is an
         # old one. Describing it would be a lie; say what actually happened.
+        problems = preflight_problems()
+        if problems:
+            listed = "\n".join(f"- {p}" for p in problems)
+            actions = "\n".join(f"- {a}" for a in sorted(
+                {failures.action_for("preflight", p) for p in problems}))
+            return (f"{mention}**Run did not start** ({stamp})\n\n"
+                    f"The preflight check stopped it before any stage ran, so nothing was "
+                    f"spent. What failed:\n\n{listed}\n\n**What to do**\n\n{actions}\n\n"
+                    f"Run: {run_url}\n")
         return (f"{mention}**Run did not start** ({stamp})\n\n"
                 f"The preflight check failed before any stage ran: a secret is missing, a tool "
                 f"is not installed, edge-tts cannot speak from the runner, or the YouTube token "
@@ -116,13 +154,17 @@ def build_message(outcome, video, events, run_url, owner="", now=None):
     else:
         plan = ("This video has used all its attempts and will not be retried; the next "
                 "run starts a new one.")
+    kind, heals, action = failures.classify(stage, message)
+    heading = ("**What to do: nothing** - this kind heals by itself."
+               if heals else "**What to do**")
     return (f"{mention}**Run FAILED** ({stamp})\n\n"
             f"**{title}** (video {video['id']})\n\n"
-            f"- Failed at stage: **{stage}**\n"
+            f"- Failed at stage: **{stage}** ({kind})\n"
             f"- Error: `{message[:500]}`\n"
-            f"- Attempt {attempts} of {MAX_ATTEMPTS}{spent}\n\n"
+            f"- Attempt {attempts} of {MAX_ATTEMPTS}{spent}\n"
+            f"{queue_line()}\n"
             f"{('Recent errors:' + chr(10) + detail + chr(10) + chr(10)) if detail else ''}"
-            f"{plan}\n\nRun: {run_url}\n")
+            f"{heading}\n\n{action}\n\n{plan}\n\nRun: {run_url}\n")
 
 
 def main(argv=None):

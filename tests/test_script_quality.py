@@ -123,6 +123,33 @@ def test_domain_diversity():
     check(not sc.domain_complaints(spread), "a plan spread across domains is accepted")
 
 
+def test_seed_domain_is_not_held_against_the_plan():
+    """Video 10 died here: seed "friendship", and every outline rejected for being about
+    friendship. The crowding rule and the prompt were asking for opposite things."""
+    print("test_seed_domain_is_not_held_against_the_plan")
+    about_friends = [{"title": f"Stop Waiting for a Friend {i}",
+                      "focus": "About friends and the invitation you did not want."}
+                     for i in range(6)]
+    check(sc.domain_complaints(about_friends), "six lessons on one area are still rejected")
+    check(not sc.domain_complaints(about_friends, exempt="friendship"),
+          "but not when friendship is what the video is about")
+    # The exemption is for one area only: a friendship video may not also be a phone video.
+    mixed = about_friends + [{"title": f"Put the Phone Down Again {i}",
+                              "focus": "About scrolling the feed and your email inbox."}
+                             for i in range(5)]
+    problems = sc.domain_complaints(mixed, exempt="friendship")
+    check(problems and "digital habits" in problems[0],
+          "crowding in any other area is still caught")
+
+    # And nothing short of a banned word may cost the day's video.
+    check(not sc.worth_losing_a_day_for("too many lessons about work (5 of 10); ..."),
+          "crowding alone does not throw the video away")
+    check(not sc.worth_losing_a_day_for('"A Nine Word Lesson Title Of Some Kind" is 9 words'),
+          "a long lesson title does not throw the video away")
+    check(sc.worth_losing_a_day_for('"Ten Hacks" uses the banned word "hack"'),
+          "a banned word still does")
+
+
 def test_forbidden_opening_prefixes():
     print("test_forbidden_opening_prefixes")
     frag = sc._avoid_openings(["You stand in the kitchen and wait.", "You sit at the desk."])
@@ -171,7 +198,8 @@ def test_clean_spaces_punctuation_without_corrupting_it():
 if __name__ == "__main__":
     for test in (test_title_ban, test_trimming, test_trim_to_budget,
                  test_hook_preview_detector, test_duplicate_openings,
-                 test_domain_diversity, test_forbidden_opening_prefixes,
+                 test_domain_diversity, test_seed_domain_is_not_held_against_the_plan,
+                 test_forbidden_opening_prefixes,
                  test_name_tics, test_outro_target,
                  test_clean_spaces_punctuation_without_corrupting_it):
         test()

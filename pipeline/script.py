@@ -185,8 +185,18 @@ JSON only."""
     return prompt
 
 
-def domain_complaints(lessons):
-    """Reject a plan that crowds most of its lessons into one area of life."""
+def domain_complaints(lessons, exempt=None):
+    """Reject a plan that crowds most of its lessons into one area of life.
+
+    `exempt` is the area the video's own seed sits in, and it is never counted against the
+    plan. Four of the 48 seeds are also areas of life - friendship, money, work and memory -
+    and for those two rules were pulling in opposite directions: the outline prompt orders
+    every lesson to work directly on the seed, and this check then rejected the outline for
+    doing exactly that. It is unwinnable, so the run died: video 10, seed "friendship", was
+    rejected three times for "too many lessons about friendship (6 of 10)" and took the whole
+    day's video with it. Crowding still matters for every OTHER area, which is what the rule
+    was written for.
+    """
     tally = {}
     for lesson in lessons:
         domain = domain_of(f"{lesson['title']} {lesson.get('focus', '')}")
@@ -194,6 +204,8 @@ def domain_complaints(lessons):
             tally[domain] = tally.get(domain, 0) + 1
     problems = []
     for domain, count in sorted(tally.items(), key=lambda kv: -kv[1]):
+        if domain == exempt:
+            continue
         if count > MAX_LESSONS_PER_DOMAIN:
             others = ", ".join(d for d in DOMAINS if d != domain)
             problems.append(f"too many lessons about {domain} ({count} of {len(lessons)}); "
@@ -201,7 +213,23 @@ def domain_complaints(lessons):
     return problems
 
 
+def worth_losing_a_day_for(complaint):
+    """True if an outline complaint is bad enough to throw the whole video away.
+
+    Only two are: a banned word, and a title copied from the examples. Both put something in
+    front of a viewer that the channel must not say. The rest - a nine-word lesson title, a
+    colon, one area of life used once too often - are blemishes in a video nobody has seen
+    yet, and the run used to die of them: after three attempts the stage raised, the day
+    produced nothing, and the video then burned its other two attempts on the same wall.
+    A slightly uneven outline published beats a perfect one that does not exist.
+    """
+    return "banned word" in complaint or "copied straight from the examples" in complaint
+
+
 def make_outline(concept, cfg, lesson_count, tics=""):
+    # The area of life the seed itself is about, so the crowding rule cannot fight the
+    # instruction to keep every lesson on the seed. None for the 44 seeds that are not areas.
+    exempt = domain_of(concept.get("seed") or "")
     complaints = []
     for attempt in range(1, OUTLINE_ATTEMPTS + 1):
         outline = complete_json(_outline_prompt(concept, cfg, lesson_count, complaints, tics),
@@ -223,14 +251,19 @@ def make_outline(concept, cfg, lesson_count, tics=""):
             complaints += title_problems(lesson["title"])
         # The video title carries a leading number, so only the word ban applies.
         complaints += title_problems(outline["title"], strict=False)
-        complaints += domain_complaints(lessons)
+        complaints += domain_complaints(lessons, exempt=exempt)
         if not complaints:
             return outline
         log.warning("outline attempt %d/%d rejected: %s", attempt, OUTLINE_ATTEMPTS,
                     "; ".join(complaints[:4]))
+        fatal = [c for c in complaints if worth_losing_a_day_for(c)]
+        if attempt == OUTLINE_ATTEMPTS and not fatal:
+            log.warning("accepting the outline anyway: nothing left that is worth losing the "
+                        "day's video over (%s)", "; ".join(complaints[:4]))
+            return outline
 
     raise RuntimeError("outline still breaks the title rules after "
-                       f"{OUTLINE_ATTEMPTS} attempts: {complaints[0]}")
+                       f"{OUTLINE_ATTEMPTS} attempts: {fatal[0] if fatal else complaints[0]}")
 
 
 # --- shared prompt fragments ----------------------------------------------
