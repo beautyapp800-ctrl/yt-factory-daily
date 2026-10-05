@@ -190,7 +190,7 @@ def make_banner(name, tagline, source, out_path):
     # Inside the safe area, with room to breathe: the words may never touch its edge, because
     # a device that crops a little tighter than the documented box would cut a letter in half.
     inner = int(SAFE[0] * 0.88)
-    name_font, name_size = fitted(name, inner, int(SAFE[1] * 0.46))
+    name_font, name_size = fitted(name, inner, int(SAFE[1] * 0.52))
     tag_font, _ = fitted(tagline, int(inner * 0.80), max(30, int(name_size * 0.34)))
 
     gap = int(name_size * 0.40)
@@ -206,8 +206,16 @@ def make_banner(name, tagline, source, out_path):
     half = int(SAFE[0] * 0.14)
     draw.rectangle([BANNER[0] // 2 - half, rule_y, BANNER[0] // 2 + half, rule_y + 4], fill=WARM)
 
+    # Measured, not trusted: a long name, or a long tagline, must not grow the block past
+    # the only part of the banner every device shows.
+    block_h = name_h + gap + tag_h
+    if block_h > SAFE[1] * 0.86:
+        raise SystemExit(f"the two lines need {block_h}px and the safe area is {SAFE[1]}px; "
+                         f"shorten the tagline")
+
     out_path.parent.mkdir(parents=True, exist_ok=True)
     img.save(out_path, "PNG")
+    print(f"banner type: name {name_size}px, block {block_h}px of the {SAFE[1]}px safe area")
     return img
 
 
@@ -220,7 +228,7 @@ def initials(name):
     return "".join(w[0] for w in words[:3]).upper()
 
 
-def make_avatar(name, out_path):
+def make_avatar(name, out_path, monogram=""):
     size = AVATAR
     # Near-black, with the warm light the thumbnails always have somewhere low in the frame.
     y, x = np.mgrid[0:size, 0:size].astype(np.float64)
@@ -231,7 +239,9 @@ def make_avatar(name, out_path):
     base *= vignette((size, size), 0.55)[:, :, None]
     img = Image.fromarray(np.clip(base, 0, 255).astype(np.uint8))
 
-    mark = initials(name)
+    # The channel already has a mark - "M1" - and an avatar is not the place to invent a
+    # second one. Initials from the name are only the fallback for a channel without one.
+    mark = (monogram or initials(name)).upper()
     # Sized to the circle, not the square: the corners are never shown.
     font, _ = fitted(mark, int(size * 0.62), int(size * 0.60))
     box = draw_centred(img, mark, font, size * 0.455, WHITE)
@@ -252,6 +262,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--name", required=True, help="the channel name, as it is shown")
     parser.add_argument("--tagline", default="First millions and Stoic discipline")
+    parser.add_argument("--monogram", default="", help="the mark on the avatar; by default "
+                                                       "the initials of the name")
     parser.add_argument("--backdrop", default="", help="a picture for the banner; by "
                                                        "default none, and the backdrop is "
                                                        "built from the palette")
@@ -263,12 +275,13 @@ def main(argv=None):
     print(f"banner backdrop: {source or 'built from the palette, no photograph'}")
 
     banner = make_banner(args.name, args.tagline, source, out / "banner.png")
-    avatar, cap_px = make_avatar(args.name, out / "avatar.png")
+    avatar, cap_px = make_avatar(args.name, out / "avatar.png", args.monogram)
     print(f"banner {banner.size[0]}x{banner.size[1]}, "
           f"{(out / 'banner.png').stat().st_size / 1024:.0f} KB (YouTube allows 6 MB)")
     print(f"avatar {avatar.size[0]}x{avatar.size[1]}, "
           f"{(out / 'avatar.png').stat().st_size / 1024:.0f} KB (YouTube allows 4 MB), "
-          f"monogram '{initials(args.name)}' is {cap_px:.1f}px tall at {AVATAR_MIN_PX}px "
+          f"monogram '{args.monogram or initials(args.name)}' is {cap_px:.1f}px tall "
+          f"at {AVATAR_MIN_PX}px "
           f"(needs {AVATAR_MIN_CAP_PX})")
     if cap_px < AVATAR_MIN_CAP_PX:
         print("WARNING: the monogram would not be readable at avatar size")
