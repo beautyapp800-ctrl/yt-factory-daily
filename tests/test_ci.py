@@ -569,6 +569,25 @@ def test_a_relaxed_plan_is_named_in_the_mail_and_counted_in_the_week(tmp):
     check("This is above the line" in report, "and explained rather than left as a number")
 
 
+def test_a_weak_thumbnail_is_named_in_the_mail(tmp):
+    print("test_a_weak_thumbnail_is_named_in_the_mail")
+    _fresh(tmp, "weakthumb")
+    vid = _video(status="published", youtube_id="abc", seo_title="Some title", duration_s=1790.0,
+                 attempts=1, published_at="2026-10-13T18:00:00Z")
+    quiet = notify.build_message("success", db.get_video(vid), [], "url", "owner", NOW)
+    check("weak way" not in quiet, "a normal thumbnail says nothing")
+
+    events = [{"stage": "thumbnail", "level": "warning",
+               "message": "no usable thumbnail phrase after 3 attempts (begins with a joining "
+                          "word); fell back to cutting the title"}]
+    message = notify.build_message("success", db.get_video(vid), events, "url", "owner", NOW)
+    check("weak way" in message and "fell back to cutting the title" in message,
+          "a fallback is in the run email, in the words the stage recorded")
+    info = [{"stage": "thumbnail", "level": "info", "message": "fine"}]
+    check("weak way" not in notify.build_message("success", db.get_video(vid), info, "u", "o", NOW),
+          "an ordinary event is not mistaken for one")
+
+
 if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
@@ -595,4 +614,5 @@ if __name__ == "__main__":
         test_the_heartbeat_speaks_the_day_the_queue_stops_growing(tmp)
         test_every_failure_has_an_action_or_heals_itself()
         test_a_relaxed_plan_is_named_in_the_mail_and_counted_in_the_week(tmp)
+        test_a_weak_thumbnail_is_named_in_the_mail(tmp)
     print("ALL CI TESTS PASSED")

@@ -101,6 +101,22 @@ def relaxed_line(video):
             f"and the prompt disagree somewhere and the valve is covering for it.\n")
 
 
+def thumbnail_line(events):
+    """Says so when the thumbnail was made the weak way.
+
+    The thumbnail stage has two quiet fallbacks - cutting the title when no phrase could be
+    written, and keeping the largest layout when none passed the feed-size check - and the
+    whole point of the new phrase and the new picture is that the first is not what happens.
+    A fallback that is only in the database is a fallback nobody sees until the CTR has been
+    low for two weeks, so it goes in the run email, in words.
+    """
+    warnings = [e for e in events if e.get("stage") == "thumbnail" and e.get("level") == "warning"]
+    if not warnings:
+        return ""
+    return (f"- **Thumbnail was made the weak way**: {warnings[-1]['message'][:300]}. "
+            f"Worth a look at the tile before it goes public.\n")
+
+
 def queue_line(now=None):
     """How much the channel has left to show. The one number worth reading in a hurry:
     a failed run matters very differently with six days of queue than with none."""
@@ -158,7 +174,7 @@ def build_message(outcome, video, events, run_url, owner="", now=None):
                 f"- YouTube makes it public: **{format_when(video.get('published_at'))}**\n"
                 f"- Length: {round((video.get('duration_s') or 0) / 60, 1)} min\n"
                 f"- Attempts: {attempts}{spent}\n"
-                f"{relaxed_line(video)}\n"
+                f"{relaxed_line(video)}{thumbnail_line(events)}\n"
                 f"Run: {run_url}\n")
 
     stage, message = split_error(video.get("error"))
