@@ -50,10 +50,12 @@ JPEG_QUALITY = 90
 
 # --- the picture
 CONTRAST = 1.30                  # pushed before darkening, so the darks stay separated
-DARKEN = 0.62                    # kept for the tests that pin the old look; see normalise_light
+DARKEN = 0.62                    # the original treatment, still used for evenly lit frames
 HIGHLIGHT_TARGET = 238           # where the brightest part of the picture is put
 MAX_LIFT = 3.0                   # and how far a very dark picture may be lifted to get there
 SHADOW_GAMMA = 1.55              # then everything below it is pushed down, hard
+DARK_BODY, LIT_BODY = 40, 100    # median luminance below / above which a picture counts as
+                                 # dark (hold its light) / lit (take it down); blended between
 VIGNETTE_STRENGTH = 0.70         # how far the extreme corners fall below the middle
 
 # --- the type
@@ -368,27 +370,34 @@ def tint_highlight(img, accent, strength=ACCENT_TINT):
 
 
 def normalise_light(arr):
-    """Hold the brightest part of the picture up and push everything else down.
+    """Hold the brightest part of a DARK picture up; take a bright, evenly lit one down.
 
-    What was here before was a flat multiply: contrast up, brightness to 0.62, vignette. That
-    is right for a narration frame, which arrives evenly lit and needs taking down. Applied to
-    a picture drawn FOR a thumbnail - one lamp in a black room - it takes the lamp down too,
-    and the tile arrives in the feed as a dark rectangle with nothing in it. The first five
-    built this way all had a focus by the numbers and still read as one grey smudge after
-    another at 210x118.
+    The original treatment was a flat multiply: brightness to 0.62, then the vignette. That is
+    right for a narration frame, which arrives evenly lit and has to be taken down so white
+    type reads over it. Applied to a picture drawn FOR a thumbnail - one lamp in a black room
+    - it takes the lamp down too, and the tile arrives in the feed as a dark rectangle with
+    nothing in it: the first five built that way all had a focus by the numbers and still read
+    as one grey smudge after another at 210x118.
 
-    So the light is normalised instead of dimmed: whatever the brightest part of this
-    particular picture is, it is lifted to near white, and a gamma then pulls the middle and
-    the shadows away from it. A bright picture is darkened almost exactly as before, because
-    its highlight is already at the top and only the gamma acts. A dark one keeps its light.
-    The result is the same thing either way - one bright thing, everything else black - which
-    is what the layout and the feed both need.
+    So a picture that is already dark has its highlight normalised instead: the brightest part
+    is lifted to near white and a gamma pulls the shadows away from it. But a picture that is
+    evenly lit has no highlight to hold up - lifting its "peak" just brightens the whole
+    frame, which a first version of this did (a flat mid-grey went from 160 to 209, caught by
+    test_the_picture_is_cropped_darkened_and_vignetted). Those get the old darkening.
+
+    The two are blended by how dark the picture's body is, not switched, so a frame halfway
+    between them gets something halfway between and no threshold makes a visible jump.
     """
     lum = arr @ np.array([0.2126, 0.7152, 0.0722])
     peak = float(np.percentile(lum, 99.5))
     gain = float(np.clip(HIGHLIGHT_TARGET / max(peak, 1.0), 1.0, MAX_LIFT))
     lifted = np.clip(arr * gain, 0, 255)
-    return 255.0 * (lifted / 255.0) ** SHADOW_GAMMA
+    held = 255.0 * (lifted / 255.0) ** SHADOW_GAMMA          # dark picture: keep its light
+    dimmed = arr * DARKEN                                    # lit picture: the original look
+
+    body = float(np.median(lum))
+    weight = float(np.clip((body - DARK_BODY) / (LIT_BODY - DARK_BODY), 0, 1))
+    return weight * dimmed + (1 - weight) * held
 
 
 def vignette_mask():

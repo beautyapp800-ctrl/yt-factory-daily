@@ -18,7 +18,24 @@ import core.logger
 core.logger.LOG_DIR = Path(tempfile.mkdtemp(prefix="yt-factory-test-"))
 
 from core import config, db
+import core.images as image_api
+import pipeline.cover_image as cover
+import pipeline.phrase as phrase
 import pipeline.thumbnail as thumb
+
+
+def _network_forbidden(*args, **kwargs):
+    raise AssertionError("this test reached the network: a stage that talks to Groq or "
+                         "Cloudflare was run without being stubbed, and that spends real "
+                         "Neurons (96 an image) every time the suite runs")
+
+
+# Replaced for the whole file. test_run_uses_the_seo_title... used to call thumb.run() with an
+# empty config, which since the thumbnail got its own phrase and its own picture meant a real
+# Groq call and three real Cloudflare images per call - 576 Neurons for one run of the tests,
+# found only because the log showed a phrase the title did not contain.
+image_api.synthesize = _network_forbidden
+phrase.complete_json = _network_forbidden
 
 
 def check(cond, msg):
@@ -223,7 +240,8 @@ def test_run_uses_the_seo_title_and_records_what_it_did(tmp):
     for i, path in enumerate((flat, dark)):
         db.add_scene_image(vid, scene["id"], i, prompt="x", seed=i, provider="cloudflare", path=path)
 
-    check(thumb.run(vid, {}) is True, "the stage completes")
+    with _stubbed(("PAUSE STOPS RAGE", []), [(dark, "cloudflare")]):
+        check(thumb.run(vid, {}) is True, "the stage completes")
     video = db.get_video(vid)
     check(video["thumbnail_path"].endswith("thumbnail.jpg") and Path(video["thumbnail_path"]).exists(),
           "videos.thumbnail_path points at the file")
@@ -231,10 +249,71 @@ def test_run_uses_the_seo_title_and_records_what_it_did(tmp):
     written = json.loads((config.output_dir(vid) / "thumbnail.json").read_text(encoding="utf-8"))
     check(written["first"] and written["second"] and "readability" in written,
           f"thumbnail.json records the words and the measurements ({sorted(written)})")
+    check(written["phrase"] == "PAUSE STOPS RAGE", "the words are the phrase that was written")
+    check(written["first"] + written["second"] == ["PAUSE", "STOPS", "RAGE"],
+          "and nothing was cut out of the title")
+    check(written["accent"] == thumb.accent_for(vid)[0], "the accent is the one this video owns")
+    check(written["drawn_for_the_thumbnail"] is True, "the picture was the one drawn for it")
 
     db.update_video(vid, seo_title="")
-    thumb.run(vid, {})
+    with _stubbed(("PAUSE STOPS RAGE", []), [(dark, "cloudflare")]):
+        thumb.run(vid, {})
     check(True, "with no seo title it falls back to the working title")
+
+
+import contextlib
+
+
+@contextlib.contextmanager
+def _stubbed(phrase_result, covers):
+    """Replace the two things run() asks the network for, and put them back afterwards.
+
+    Every test that calls run() has to say what they return, which is the point: none of them
+    can forget they exist. Restoring matters as much as replacing - the first version of this
+    helper did not, and a stub left on the phrase module made a later test of the real
+    write_phrase quietly test the stub instead.
+    """
+    real_write, real_draw = phrase.write_phrase, cover.draw
+    phrase.write_phrase = lambda *a, **k: phrase_result
+    cover.draw = lambda *a, **k: covers
+    try:
+        yield
+    finally:
+        phrase.write_phrase, cover.draw = real_write, real_draw
+
+
+def test_a_failed_phrase_falls_back_loudly_not_quietly(tmp):
+    print("test_a_failed_phrase_falls_back_loudly_not_quietly")
+    db.DB_PATH = tmp / "fallback.db"
+    config.OUTPUT_DIR = tmp / "out_fallback"
+    db.init_db()
+    vid = db.create_video("fallback")
+    db.update_video(vid, title="Working", seo_title="Stop Chasing Approval")
+    flat, panel, bright, dark = _pictures(tmp)
+    db.add_scene(vid, 1, text="One.", image_prompt="x")
+    scene = db.get_scenes(vid)[0]
+    db.add_scene_image(vid, scene["id"], 0, prompt="x", seed=0, provider="cloudflare", path=dark)
+
+    # No phrase could be written, and no cover could be drawn: the worst day. A thumbnail
+    # must still come out - a video with none is worse than one with a weak one - but both
+    # fallbacks have to be on the record, or nobody learns the fix stopped working.
+    with _stubbed(("WHILE STAYING TRUE", ["begins with a joining word"]), []):
+        check(thumb.run(vid, {}) is True, "a thumbnail is still made")
+    written = json.loads((config.output_dir(vid) / "thumbnail.json").read_text(encoding="utf-8"))
+    check(written["phrase_fallback"], "the fallback is written into thumbnail.json")
+    check(written["phrase"] == "", "and no phrase is claimed")
+    check(written["drawn_for_the_thumbnail"] is False, "the narration-frame fallback is recorded too")
+    events = [e for e in _events(vid) if e["level"] == "warning"]
+    check(any("fell back to cutting the title" in e["message"] for e in events),
+          "and a warning event is in the database, where the weekly report can count it")
+
+
+def _events(vid):
+    import sqlite3
+    from contextlib import closing
+    with closing(sqlite3.connect(db.DB_PATH)) as conn:
+        conn.row_factory = sqlite3.Row
+        return [dict(r) for r in conn.execute("SELECT * FROM events WHERE video_id = ?", (vid,))]
 
 
 def test_no_title_raises(tmp):
@@ -250,6 +329,180 @@ def test_no_title_raises(tmp):
         check("title" in str(e), "the error names the actual problem")
 
 
+# --- the phrase --------------------------------------------------------------------------
+
+def test_the_phrase_rules_refuse_what_the_brief_names():
+    print("test_the_phrase_rules_refuse_what_the_brief_names")
+    for opener in ("while", "when", "to", "that", "how", "for"):
+        bad = f"{opener.upper()} PROGRESS DRAGS"
+        check(phrase.problems(bad), f"a phrase opening on '{opener}' is refused")
+    check(not phrase.problems("ANGER COSTS MORE"), "a finished thought passes")
+    check(not phrase.problems("PATIENCE OR PRIDE"), "so does a named tension")
+    check(phrase.problems("ANGER"), "one word is too few")
+    check(phrase.problems("ANGER COSTS YOU FAR MORE THAN"), "five words are too many")
+    check(phrase.problems("STOIC LESSONS"), "words every video in the niche uses say nothing")
+    title = "10 Stoic Lessons to Stay Calm While Progress Drags"
+    check(phrase.problems("STAY CALM WHILE", title) or phrase.problems("CALM WHILE PROGRESS", title),
+          "three title words in a row are the old defect wearing a different hat")
+    check(phrase.problems("PAT IENCE BREEDS SUCCESS", "10 Stoic Lessons to Master Patience"),
+          "a word broken in half is refused - it reached a finished tile once")
+    check(phrase.problems("SILENCE SHATTERS ARGUMENTS", "", fits=lambda p: False),
+          "and so is one the layout says it cannot set")
+
+
+def test_every_example_in_the_prompt_obeys_the_prompt():
+    print("test_every_example_in_the_prompt_obeys_the_prompt")
+    import re
+    text = phrase._prompt("t", "p", ["l"], "T")
+    # the ones the prompt quotes as FAILURES are the only examples allowed to break the rules
+    shown = [m for m in re.findall(r'"([A-Z][A-Z ]+)"', text)
+             if m not in ("WHILE PROGRESS DRAGS", "WHILE STAYING TRUE", "YOUR PHRASE")]
+    check(shown, "the prompt gives examples")
+    for example in shown:
+        check(not phrase.problems(example), f"'{example}' passes the rules it is an example of")
+
+
+def test_a_rejected_phrase_is_asked_for_again_with_the_reason():
+    print("test_a_rejected_phrase_is_asked_for_again_with_the_reason")
+    answers = iter([{"phrase": "WHILE PROGRESS DRAGS"}, {"phrase": "TO KEEP FRIENDS"},
+                    {"phrase": "KINDNESS HAS LIMITS"}])
+    prompts = []
+
+    def fake(prompt, **kw):
+        prompts.append(prompt)
+        return next(answers)
+
+    phrase.complete_json = fake
+    try:
+        got, complaints = phrase.write_phrase("friendship", "p", ["a", "b"], "Some Title Here")
+    finally:
+        phrase.complete_json = _network_forbidden
+    check(got == "KINDNESS HAS LIMITS" and not complaints, "the third try is the one used")
+    check(len(prompts) == 3, "it took three calls")
+    check("begins with" in prompts[1] and "WHILE PROGRESS DRAGS" in prompts[1],
+          "the second call is told what was wrong with the first, by name")
+
+    phrase.complete_json = lambda *a, **k: {"phrase": "WHILE STAYING TRUE"}
+    try:
+        got, complaints = phrase.write_phrase("t", "p", ["a"], "T", attempts=2)
+    finally:
+        phrase.complete_json = _network_forbidden
+    check(complaints, "refusals all the way down come back as complaints, not as a phrase")
+
+
+def test_line_options_break_the_phrase_evenly_first():
+    print("test_line_options_break_the_phrase_evenly_first")
+    check(phrase.line_options("ANGER COSTS MORE")[0] == (["ANGER"], ["COSTS", "MORE"]),
+          "the more even split comes first")
+    check(phrase.line_options("ONE") == [], "a single word cannot be two lines")
+
+
+# --- the accent --------------------------------------------------------------------------
+
+def test_the_accent_turns_with_the_video_and_always_reads():
+    print("test_the_accent_turns_with_the_video_and_always_reads")
+    names = [thumb.accent_for(v)[0] for v in range(1, 30)]
+    check(all(a != b for a, b in zip(names, names[1:])), "no two neighbouring videos share a colour")
+    check(thumb.accent_for(12) == thumb.accent_for(12), "the same video always gets the same one")
+    check(len({n for n, _ in thumb.ACCENTS}) >= 6, "there are enough colours for a row not to repeat")
+    near_black = np.full((118, 210), 20, dtype=np.uint8)
+    full = np.full((118, 210), 255, dtype=np.uint8)
+    for name, rgb in thumb.ACCENTS:
+        ratio = thumb._contrast_ratio(rgb, near_black, full)
+        check(ratio >= thumb.MIN_CONTRAST,
+              f"{name} clears {thumb.MIN_CONTRAST}:1 on the dark scrim ({ratio:.1f}:1)")
+
+
+# --- the picture -------------------------------------------------------------------------
+
+def _lamp(tmp, name, radius, level=235, base=12):
+    y, x = np.mgrid[0:720, 0:1280]
+    img = np.full((720, 1280), base, dtype=np.float64)
+    img[((x - 900) ** 2 + (y - 300) ** 2) < radius ** 2] = level
+    return _save(tmp / name, img)
+
+
+def test_a_frame_needs_one_light_neither_a_sliver_nor_a_room(tmp):
+    print("test_a_frame_needs_one_light_neither_a_sliver_nor_a_room")
+    check(thumb.has_focus(thumb.focal_stats(_lamp(tmp, "lamp.png", 110))),
+          "one lamp in a dark room has a focus")
+    check(not thumb.has_focus(thumb.focal_stats(_lamp(tmp, "sliver.png", 6))),
+          "a light a few pixels wide does not: at 210x118 it is not there")
+    check(not thumb.has_focus(thumb.focal_stats(_lamp(tmp, "room.png", 520))),
+          "a lit room does not: the light is the picture, so there is nothing to land on")
+    flat = _save(tmp / "grey.png", np.full((720, 1280), 110))
+    check(not thumb.has_focus(thumb.focal_stats(flat)), "an evenly lit frame does not")
+
+
+def test_a_dark_picture_keeps_its_light_and_a_lit_one_is_taken_down():
+    print("test_a_dark_picture_keeps_its_light_and_a_lit_one_is_taken_down")
+    y, x = np.mgrid[0:720, 0:1280]
+    dark = np.full((720, 1280, 3), 12.0)
+    dark[((x - 900) ** 2 + (y - 300) ** 2) < 110 ** 2] = 140.0        # a dim lamp
+    out = thumb.normalise_light(dark)
+    check(out[300, 900].mean() > 200, f"the lamp is held up near white ({out[300, 900].mean():.0f})")
+    check(out[600, 200].mean() < 12, "and the room around it goes no brighter")
+    lit = np.full((720, 1280, 3), 160.0)
+    check(thumb.normalise_light(lit).mean() < 160, "a flat bright frame is darkened, as it always was")
+
+
+def test_a_better_lamp_beats_a_better_texture(tmp):
+    print("test_a_better_lamp_beats_a_better_texture")
+    lamp = _lamp(tmp, "good_lamp.png", 110)
+    flat, panel, bright, dark = _pictures(tmp)
+    source, pick = thumb.pick_background([(bright, "cloudflare"), (lamp, "cloudflare"),
+                                          (flat, "cloudflare")])
+    check(source == lamp, "the frame with one light is chosen over a richer one with none")
+    check(pick["focus"] is True, "and the pick says it has a focus")
+
+
+# --- the cover ---------------------------------------------------------------------------
+
+def test_the_cover_prompt_follows_the_picture_rules_and_the_video():
+    print("test_the_cover_prompt_follows_the_picture_rules_and_the_video")
+    style = ("cinematic painterly illustration, wide horizontal composition, soft volumetric "
+             "light, quiet atmosphere, no text, no lettering")
+    seen = [cover.prompt_for(v, "t", style) for v in range(10, 16)]
+    check(len(set(seen)) == 6, "six neighbouring videos get six different compositions")
+    for subject in cover.SUBJECTS:
+        hits = cover.banned_words_in(f"{subject}, {cover.COMPOSITION}")
+        check(not hits, f"nothing the picture rules ban is in: {subject[:46]}... ({hits})")
+    check("wide horizontal composition" not in seen[0] and "soft volumetric light" not in seen[0],
+          "the parts of the channel style that fight a thumbnail composition are taken out")
+    check("no lettering" in seen[0], "and the channel's own bans are kept")
+
+
+def test_covers_are_not_bought_twice_and_a_failure_is_not_fatal(tmp):
+    print("test_covers_are_not_bought_twice_and_a_failure_is_not_fatal")
+    db.DB_PATH = tmp / "cov.db"
+    config.OUTPUT_DIR = tmp / "out_cov"
+    db.init_db()
+    calls = []
+
+    def fake(prompt, path, seed, cfg):
+        calls.append(path)
+        Path(path).write_bytes(b"x" * 2000)
+        return "cloudflare", 96
+
+    image_api.synthesize = fake
+    try:
+        first = cover.draw(77, "t", {"image_style": "cinematic"})
+        check(len(first) == cover.CANDIDATES and len(calls) == cover.CANDIDATES,
+              "a first run draws every candidate")
+        again = cover.draw(77, "t", {"image_style": "cinematic"})
+        check(len(calls) == cover.CANDIDATES and len(again) == cover.CANDIDATES,
+              "a rerun of the same video draws nothing: it does not spend twice")
+
+        def failing(prompt, path, seed, cfg):
+            raise image_api.ImageError("service down")
+
+        image_api.synthesize = failing
+        check(cover.draw(78, "t", {"image_style": "cinematic"}) == [],
+              "when the service is down the result is empty and nothing raises")
+    finally:
+        image_api.synthesize = _network_forbidden
+
+
 if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
@@ -263,5 +516,16 @@ if __name__ == "__main__":
         test_the_finished_thumbnail(tmp)
         test_the_feed_size_check_can_say_no(tmp)
         test_run_uses_the_seo_title_and_records_what_it_did(tmp)
+        test_a_failed_phrase_falls_back_loudly_not_quietly(tmp)
         test_no_title_raises(tmp)
+        test_the_phrase_rules_refuse_what_the_brief_names()
+        test_every_example_in_the_prompt_obeys_the_prompt()
+        test_a_rejected_phrase_is_asked_for_again_with_the_reason()
+        test_line_options_break_the_phrase_evenly_first()
+        test_the_accent_turns_with_the_video_and_always_reads()
+        test_a_frame_needs_one_light_neither_a_sliver_nor_a_room(tmp)
+        test_a_dark_picture_keeps_its_light_and_a_lit_one_is_taken_down()
+        test_a_better_lamp_beats_a_better_texture(tmp)
+        test_the_cover_prompt_follows_the_picture_rules_and_the_video()
+        test_covers_are_not_bought_twice_and_a_failure_is_not_fatal(tmp)
     print("ALL THUMBNAIL TESTS PASSED")
