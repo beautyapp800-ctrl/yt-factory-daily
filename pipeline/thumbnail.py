@@ -39,6 +39,7 @@ from PIL import Image, ImageDraw, ImageEnhance, ImageFont
 
 from core import db, ocr
 from core.config import output_dir
+from pipeline import cover_image, phrase as phrase_writer
 from core.logger import get_logger
 
 log = get_logger("thumbnail")
@@ -49,7 +50,10 @@ JPEG_QUALITY = 90
 
 # --- the picture
 CONTRAST = 1.30                  # pushed before darkening, so the darks stay separated
-DARKEN = 0.62
+DARKEN = 0.62                    # kept for the tests that pin the old look; see normalise_light
+HIGHLIGHT_TARGET = 238           # where the brightest part of the picture is put
+MAX_LIFT = 3.0                   # and how far a very dark picture may be lifted to get there
+SHADOW_GAMMA = 1.55              # then everything below it is pushed down, hard
 VIGNETTE_STRENGTH = 0.70         # how far the extreme corners fall below the middle
 
 # --- the type
@@ -63,7 +67,23 @@ LINE_GAP = 0.04                  # between the two lines, as a fraction of the f
 SECOND_LINE_RATIOS = (0.52, 0.60, 0.68)
 WHITE = (255, 255, 255)
 WARM = (240, 176, 84)            # amber, warm against the cold blues these pictures tend to
+
+# One amber on every tile made the channel page a single colour, and a row that is all one
+# colour has nothing in it for the eye to catch. The accent now turns with the video number,
+# so neighbours in the feed never share one. Every colour here clears 4.5:1 against the scrim
+# at its darkest - checked by the readability test on each build, not assumed - and all of
+# them are lights, not pigments: they read as something glowing in the frame.
+ACCENTS = [
+    ("amber", (240, 176, 84)),
+    ("ice", (143, 184, 255)),
+    ("coral", (255, 138, 107)),
+    ("mint", (126, 226, 181)),
+    ("violet", (195, 155, 255)),
+    ("gold", (255, 209, 102)),
+    ("cyan", (94, 203, 214)),
+]
 FONT_PATH = Path(__file__).resolve().parent.parent / "assets" / "fonts" / "Anton-Regular.ttf"
+ACCENT_TINT = 0.30               # how far the picture's own highlight is pulled to the accent
 
 # --- the scrim
 SCRIM_DARKNESS = 0.82            # how black it is at its strongest
@@ -220,6 +240,7 @@ def pick_background(candidates):
     if not clean:
         raise RuntimeError("no images to make a thumbnail from")
 
+    focal = [focal_stats(p) for p, _ in clean]
     stats = np.array([image_stats(p) for p, _ in clean])
     contrast, rim, left, detail = stats.T
 
@@ -227,7 +248,19 @@ def pick_background(candidates):
         span = v.max() - v.min()
         return (v - v.min()) / span if span > 0 else np.zeros_like(v)
 
-    score = unit(contrast) + (1 - unit(rim)) + (1 - unit(left)) + unit(detail)
+    def col(key):
+        return np.array([f[key] for f in focal], dtype=np.float64)
+
+    # The old scoring measured how striking a picture is in itself. What decides a
+    # thumbnail is narrower: whether there is ONE place for the eye to land. So the shape
+    # of the light now carries most of the weight - how far the brightest part stands
+    # above the rest, how little of the frame it covers, how tightly it is gathered - and
+    # the old measures stay as a tiebreak between frames that all have a focus.
+    score = (1.4 * unit(col("span")) + 1.4 * unit(col("compact")) + (1 - unit(col("bright")))
+             + (1 - unit(left)) + 0.5 * unit(detail) + 0.3 * (1 - unit(rim)))
+    # A frame with no focus at all is not ranked lower, it is put last: at 210x118 it is
+    # a smear whatever else is right about it.
+    score = np.where([has_focus(f) for f in focal], score, score - 10)
     order = list(np.argsort(-score))
     rejected = []
     for rank, i in enumerate(order):
@@ -237,7 +270,10 @@ def pick_background(candidates):
             return clean[i][0], {"contrast": float(contrast[i]), "rim": float(rim[i]),
                                  "left": float(left[i]), "detail": float(detail[i]),
                                  "score": float(score[i]), "candidates": len(clean),
-                                 "rank": rank + 1, "rejected_for_text": rejected}
+                                 "rank": rank + 1, "rejected_for_text": rejected,
+                                 "focus": has_focus(focal[i]),
+                                 **{k: round(v, 3) for k, v in focal[i].items()
+                                    if k != "contrast"}}
         rejected.append(f"{Path(clean[i][0]).name} ({chars} characters)")
         log.info("background %s skipped: OCR reads %d characters on it",
                  Path(clean[i][0]).name, chars)
@@ -247,7 +283,112 @@ def pick_background(candidates):
     return clean[best][0], {"contrast": float(contrast[best]), "rim": float(rim[best]),
                             "left": float(left[best]), "detail": float(detail[best]),
                             "score": float(score[best]), "candidates": len(clean),
-                            "rank": 1, "rejected_for_text": rejected}
+                            "rank": 1, "rejected_for_text": rejected,
+                            "focus": has_focus(focal[best]),
+                            **{k: round(v, 3) for k, v in focal[best].items()
+                               if k != "contrast"}}
+
+
+def accent_for(video_id):
+    """(name, rgb) for this video. Deterministic, so a rebuild never changes a published tile,
+    and consecutive videos never land on the same colour."""
+    return ACCENTS[int(video_id) % len(ACCENTS)]
+
+
+def focal_stats(path):
+    """Whether the picture has somewhere for the eye to land, measured on the 16:9 crop.
+
+    A thumbnail fails in a feed by being evenly dark - a wide landscape at postage-stamp size
+    is a grey smear, and the viewer's eye has nothing to stop on. What works is one bright
+    thing against dark: a lamp, a window, a figure with the light behind it.
+
+    So this measures the shape of the light rather than how much of it there is:
+
+    span        how far the brightest part stands above the body of the picture - high is good
+    bright      the fraction of the frame that is in that brightest part - LOW is good, a
+                small hot area is a light source, a large one is a lit room
+    compact     how tightly that bright part is gathered in one place, 1 being a single spot
+                and 0 being scattered over the whole frame - high is good
+    left        mean luminance of the left 45%, where the type goes - low is good
+
+    `compact` is the one that does the work. Without it, a frame speckled with bright
+    highlights everywhere scores as well as one with a single lamp in it, and at 210x118
+    those two look nothing alike.
+    """
+    with Image.open(path) as img:
+        lum = np.asarray(crop_16_9(img.convert("L")).resize((320, 180)), dtype=np.float64)
+    median = float(np.median(lum))
+    peak = float(np.percentile(lum, 99))
+    span = peak - median
+    mask = lum > (median + 0.55 * span) if span > 1 else np.zeros_like(lum, dtype=bool)
+    bright = float(mask.mean())
+    if mask.any():
+        ys, xs = np.nonzero(mask)
+        # Spread of the bright pixels about their own centre, as a fraction of the half
+        # diagonal: 0 when they sit in one spot, towards 1 when they are everywhere.
+        spread = np.sqrt(((xs - xs.mean()) / (lum.shape[1] / 2)) ** 2
+                         + ((ys - ys.mean()) / (lum.shape[0] / 2)) ** 2).mean()
+        compact = float(np.clip(1 - spread, 0, 1))
+    else:
+        compact = 0.0
+    left = float(lum[:, :int(lum.shape[1] * 0.45)].mean())
+    return {"span": span, "bright": bright, "compact": compact, "left": left,
+            "contrast": float(lum.std())}
+
+
+# A frame has somewhere to look if its brightest part stands well clear of the rest and does
+# not cover half the picture. Both numbers are read off the measurements above, and a frame
+# that fails both is the "wide evenly dark landscape" this layout cannot use.
+FOCAL_MIN_SPAN = 45              # of 255
+FOCAL_MAX_BRIGHT = 0.30          # of the frame
+FOCAL_MIN_BRIGHT = 0.015         # and not a sliver either: at 210x118 a light
+                                 # smaller than this is a few pixels, invisible
+
+
+def has_focus(stats):
+    return (stats["span"] >= FOCAL_MIN_SPAN
+            and FOCAL_MIN_BRIGHT <= stats["bright"] <= FOCAL_MAX_BRIGHT)
+
+
+def tint_highlight(img, accent, strength=ACCENT_TINT):
+    """Pull the picture's own bright parts towards the accent colour.
+
+    The coloured line of type is a few hundred pixels; at feed size it is a smudge. What makes
+    one tile read as a different colour from the one above it is the light in the picture, so
+    the light is tinted too - only the light, in proportion to how bright it already is, so
+    the frame still looks lit rather than painted.
+    """
+    arr = np.asarray(img, dtype=np.float64)
+    lum = arr @ np.array([0.2126, 0.7152, 0.0722])
+    weight = np.clip((lum - np.percentile(lum, 75)) / max(1.0, np.percentile(lum, 99.5)
+                                                          - np.percentile(lum, 75)), 0, 1)
+    weight = (weight ** 1.5)[:, :, None] * strength
+    target = np.array(accent, dtype=np.float64) * (lum[:, :, None] / 255)
+    return Image.fromarray(np.clip(arr * (1 - weight) + target * weight, 0, 255).astype(np.uint8))
+
+
+def normalise_light(arr):
+    """Hold the brightest part of the picture up and push everything else down.
+
+    What was here before was a flat multiply: contrast up, brightness to 0.62, vignette. That
+    is right for a narration frame, which arrives evenly lit and needs taking down. Applied to
+    a picture drawn FOR a thumbnail - one lamp in a black room - it takes the lamp down too,
+    and the tile arrives in the feed as a dark rectangle with nothing in it. The first five
+    built this way all had a focus by the numbers and still read as one grey smudge after
+    another at 210x118.
+
+    So the light is normalised instead of dimmed: whatever the brightest part of this
+    particular picture is, it is lifted to near white, and a gamma then pulls the middle and
+    the shadows away from it. A bright picture is darkened almost exactly as before, because
+    its highlight is already at the top and only the gamma acts. A dark one keeps its light.
+    The result is the same thing either way - one bright thing, everything else black - which
+    is what the layout and the feed both need.
+    """
+    lum = arr @ np.array([0.2126, 0.7152, 0.0722])
+    peak = float(np.percentile(lum, 99.5))
+    gain = float(np.clip(HIGHLIGHT_TARGET / max(peak, 1.0), 1.0, MAX_LIFT))
+    lifted = np.clip(arr * gain, 0, 255)
+    return 255.0 * (lifted / 255.0) ** SHADOW_GAMMA
 
 
 def vignette_mask():
@@ -259,14 +400,14 @@ def vignette_mask():
     return 1 - VIGNETTE_STRENGTH * smooth
 
 
-def background(path):
-    """The picture: cropped to 16:9, contrast pushed, darkened, vignetted."""
+def background(path, accent=WARM):
+    """The picture: cropped to 16:9, contrast pushed, darkened, vignetted, light tinted."""
     with Image.open(path) as img:
         img = crop_16_9(img.convert("RGB")).resize((WIDTH, HEIGHT), Image.LANCZOS)
     img = ImageEnhance.Contrast(img).enhance(CONTRAST)
-    img = ImageEnhance.Brightness(img).enhance(DARKEN)
-    arr = np.asarray(img, dtype=np.float64) * vignette_mask()[:, :, None]
-    return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
+    arr = normalise_light(np.asarray(img, dtype=np.float64))
+    arr = arr * vignette_mask()[:, :, None]
+    return tint_highlight(Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8)), accent)
 
 
 def apply_scrim(img, box):
@@ -294,13 +435,19 @@ def _measure(line, size, font_path=FONT_PATH):
     return font, box, box[2] - box[0], box[3] - box[1]
 
 
-def layouts(first, second, font_path=FONT_PATH):
+def layouts(first, second, font_path=FONT_PATH, column_fraction=TEXT_COLUMN,
+            min_fraction=MIN_BLOCK_FRACTION):
     """Every candidate layout, largest type first.
 
     Only those that fit the text column and land inside the height the brief asks for are
     offered, so anything this returns already satisfies the shape requirements.
+
+    The column and the minimum height are arguments rather than constants so that compose
+    can ask a second time with a little more room. The shape is a requirement, but it is a
+    requirement about how a thumbnail should look, and a thumbnail that does not exist
+    looks like nothing at all.
     """
-    column = WIDTH * TEXT_COLUMN - MARGIN_X
+    column = WIDTH * column_fraction - MARGIN_X
     first_text, second_text = " ".join(first), " ".join(second)
     out = []
     for size in range(220, 60, -4):
@@ -312,7 +459,7 @@ def layouts(first, second, font_path=FONT_PATH):
             height, width = h1 + gap + h2, max(w1, w2)
             if width > column:
                 continue
-            if not (HEIGHT * MIN_BLOCK_FRACTION <= height <= HEIGHT * MAX_BLOCK_FRACTION):
+            if not (HEIGHT * min_fraction <= height <= HEIGHT * MAX_BLOCK_FRACTION):
                 continue
             out.append({"size": size, "small_size": small, "gap": gap, "height": height,
                         "width": width, "boxes": (box1, box2),
@@ -320,7 +467,7 @@ def layouts(first, second, font_path=FONT_PATH):
     return out
 
 
-def draw_lines(img, layout, font_path=FONT_PATH):
+def draw_lines(img, layout, font_path=FONT_PATH, accent=WARM):
     """Draw both lines. Returns the block's (left, top, right, bottom) and a mask per line."""
     box1, box2 = layout["boxes"]
     top = HEIGHT - MARGIN_BOTTOM - layout["height"]
@@ -328,7 +475,7 @@ def draw_lines(img, layout, font_path=FONT_PATH):
     masks, y = {}, top
     for text, size, colour, box, key in (
             (layout["first"], layout["size"], WHITE, box1, "first"),
-            (layout["second"], layout["small_size"], WARM, box2, "second")):
+            (layout["second"], layout["small_size"], accent, box2, "second")):
         font = ImageFont.truetype(str(font_path), size)
         # box[0]/box[1] are the ink's offset from the drawing origin; cancelling them puts
         # the ink itself on the margin, not the font's empty ascender space.
@@ -364,7 +511,7 @@ def _contrast_ratio(colour, backdrop_small, mask_small):
     return (max(text, behind) + 0.05) / (min(text, behind) + 0.05)
 
 
-def readability(backdrop, masks, layout, font_path=FONT_PATH):
+def readability(backdrop, masks, layout, font_path=FONT_PATH, accent=WARM):
     """What survives at 210x118: capital height of the smaller line, contrast of each line."""
     scale = SMALL[1] / HEIGHT
     cap = ImageFont.truetype(str(font_path), layout["small_size"]).getbbox("H")
@@ -373,7 +520,7 @@ def readability(backdrop, masks, layout, font_path=FONT_PATH):
     small_backdrop = np.asarray(backdrop.convert("L").resize(SMALL, Image.LANCZOS))
     ratios = {key: _contrast_ratio(colour, small_backdrop,
                                    np.asarray(masks[key].resize(SMALL, Image.LANCZOS)))
-              for key, colour in (("first", WHITE), ("second", WARM))}
+              for key, colour in (("first", WHITE), ("second", accent))}
     return {"cap_px": cap_px, "contrast_first": ratios["first"],
             "contrast_second": ratios["second"],
             "ok": cap_px >= MIN_SMALL_CAP_PX and min(ratios.values()) >= MIN_CONTRAST}
@@ -392,39 +539,50 @@ def _ocr_reading(small_path, first, second):
 
 # --- putting it together -----------------------------------------------------
 
-def compose(source, options, font_path=FONT_PATH):
+def compose(source, options, font_path=FONT_PATH, accent=WARM):
     """Try every (words, layout) pair and return (image, layout, readability, tried).
 
     `options` is title_line_options(): candidate word pairs, most informative first. For each
     pair the layouts come largest-first, so the first combination that passes the readability
     check keeps as much of the title as the geometry allows and sets it as large as it can.
     """
-    base = background(source)
+    base = background(source, accent)
     best, tried = None, 0
-    for first, second in options:
-        for layout in layouts(first, second, font_path):
+    # Normal geometry first; if not one combination fits, the same options are offered a
+    # wider column and a slightly shorter block rather than the stage failing.
+    for column, min_fraction in ((TEXT_COLUMN, MIN_BLOCK_FRACTION), (0.64, 0.30)):
+      for first, second in options:
+        for layout in layouts(first, second, font_path, column, min_fraction):
             tried += 1
-            box, masks = draw_lines(base.copy(), layout, font_path)
+            box, masks = draw_lines(base.copy(), layout, font_path, accent)
             backdrop = apply_scrim(base.copy(), box)
             final = backdrop.copy()
-            draw_lines(final, layout, font_path)
-            check = readability(backdrop, masks, layout, font_path)
+            draw_lines(final, layout, font_path, accent)
+            check = readability(backdrop, masks, layout, font_path, accent)
             if check["ok"]:
                 return final, layout, check, tried
             if best is None or check["cap_px"] > best[2]["cap_px"]:
                 best = (final, layout, check, tried)
+      if best is not None:
+        break
     if best is None:
         raise RuntimeError("no two-line layout fits in the left half of the frame for "
                            + repr(options[0]))
     return best[0], best[1], best[2], tried
 
 
-def make_thumbnail(candidates, title, out_dir, font_path=FONT_PATH):
-    """Build thumbnail.jpg and thumb_small.jpg in out_dir. Returns a details dict."""
+def make_thumbnail(candidates, title, out_dir, font_path=FONT_PATH, options=None,
+                   accent=WARM, accent_name="amber"):
+    """Build thumbnail.jpg and thumb_small.jpg in out_dir. Returns a details dict.
+
+    `options` is the list of (first line, second line) word pairs to try. The caller
+    passes the ones made from the phrase written for this video; cutting the title up
+    happens only when no phrase could be written, and the caller says so when it does.
+    """
     out_dir = Path(out_dir)
-    options = title_line_options(title)
+    options = options or title_line_options(title)
     source, pick = pick_background(candidates)
-    img, layout, check, tried = compose(source, options, font_path)
+    img, layout, check, tried = compose(source, options, font_path, accent)
     first, second = layout["first"].split(), layout["second"].split()
 
     thumb = out_dir / "thumbnail.jpg"
@@ -438,8 +596,52 @@ def make_thumbnail(candidates, title, out_dir, font_path=FONT_PATH):
             "font_size": layout["size"], "small_font_size": layout["small_size"],
             "block_height": layout["height"], "block_width": layout["width"],
             "block_fraction": round(layout["height"] / HEIGHT, 3),
+            "accent": accent_name, "accent_rgb": list(accent),
             "layouts_tried": tried, "word_options": len(options),
             "readability": {**check, "ocr_share": share, "ocr_read": read}, **pick}
+
+
+def _phrase_for(video_id, title, cfg):
+    """(options, phrase, note). `note` is empty unless the fallback was used.
+
+    The words are written for the thumbnail, as their own job - see pipeline/phrase.py for
+    why cutting them out of the title produced lines like "WHILE PROGRESS DRAGS". If that
+    cannot be done the old cutting still happens, because a video with no thumbnail is worse
+    than a video with a weak one, but it is recorded rather than passed off as normal.
+    """
+    out = output_dir(video_id)
+    outline_path = out / "outline.json"
+    outline = {}
+    if outline_path.exists():
+        outline = json.loads(outline_path.read_text(encoding="utf-8"))
+    lessons = [l.get("title", "") for l in (outline.get("lessons") or [])]
+    topic = (db.get_video(video_id) or {}).get("topic") or title
+    promise = outline.get("promise") or ""
+
+    # The layout gets a vote on the words: heavy capitals a third of the frame tall leave
+    # room for about eight characters, and a phrase the thumbnail cannot set is no phrase.
+    def fits(candidate):
+        return any(layouts(first, second)
+                   for first, second in phrase_writer.line_options(candidate))
+
+    try:
+        phrase, complaints = phrase_writer.write_phrase(topic, promise, lessons, title,
+                                                        fits=fits)
+    except Exception as e:                                       # noqa: BLE001
+        phrase, complaints = "", [f"the phrase could not be written at all: {e}"]
+
+    if phrase and not complaints:
+        options = phrase_writer.line_options(phrase)
+        if options:
+            return options, phrase, ""
+        complaints = [f'"{phrase}" cannot be broken across two lines']
+
+    note = ("no usable thumbnail phrase after "
+            f"{phrase_writer.ATTEMPTS} attempts ({'; '.join(complaints)[:200]}); "
+            "fell back to cutting the title")
+    log.warning(note)
+    db.log_event(video_id, "thumbnail", "warning", note)
+    return title_line_options(title), "", note
 
 
 def run(video_id, cfg):
@@ -448,9 +650,30 @@ def run(video_id, cfg):
     if not title:
         raise RuntimeError("the video has no title to take the thumbnail words from")
 
+    accent_name, accent = accent_for(video_id)
+    options, phrase, fallback_note = _phrase_for(video_id, title, cfg)
+
+    # The thumbnail's own picture first, the narration frames behind it. Three covers cost
+    # 288 Neurons of a daily 10,000 and are the only frames in the video composed for a
+    # 210x118 feed rather than for someone already watching.
     rows = db.get_video_images(video_id)
-    candidates = [(r["path"], r["provider"]) for r in rows if r["path"]]
-    result = make_thumbnail(candidates, title, output_dir(video_id))
+    narration = [(r["path"], r["provider"]) for r in rows if r["path"]]
+    covers = cover_image.draw(video_id, video.get("topic") or title, cfg)
+    candidates = covers + narration
+    if not covers:
+        log.warning("no cover could be drawn; falling back to the narration frames, which are "
+                    "composed for a viewer who is already watching")
+
+    result = make_thumbnail(candidates, title, output_dir(video_id), options=options,
+                            accent=accent, accent_name=accent_name)
+    result["phrase"] = phrase
+    result["phrase_fallback"] = fallback_note
+    result["drawn_for_the_thumbnail"] = str(result["source"]) in {c for c, _ in covers}
+    log.info("accent %s %s, phrase %r%s", accent_name, tuple(accent), phrase,
+             " (FALLBACK: cut from the title)" if fallback_note else "")
+    log.info("background was %s",
+             "drawn for the thumbnail" if result["drawn_for_the_thumbnail"]
+             else "taken from the narration frames")
 
     log.info("background %s (contrast %.1f, rim %.1f, left %.1f, detail %.1f, ranked %d of "
              "%d%s)", Path(result["source"]).name, result["contrast"], result["rim"],
@@ -481,6 +704,8 @@ def run(video_id, cfg):
                    indent=2, default=str), encoding="utf-8")
     db.update_video(video_id, thumbnail_path=str(result["path"]))
     db.log_event(video_id, "thumbnail", "info",
-                 f"{Path(result['source']).name} behind "
-                 f"{' '.join(result['first'])} / {' '.join(result['second'])}")
+                 f"{' '.join(result['first'])} / {' '.join(result['second'])} in {accent_name} "
+                 f"over {Path(result['source']).name} "
+                 f"({'drawn for the thumbnail' if result['drawn_for_the_thumbnail'] else 'a narration frame'}"
+                 f"{', focus ' + ('yes' if result.get('focus') else 'NO')})")
     return True
