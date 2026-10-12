@@ -19,7 +19,7 @@
     "max_rpm": 25
   },
   "tts": {
-    "provider": "edge",
+    "provider": "piper",
     "piper": {
       "voice": "en_US-ryan-high",
       "length_scale": 1.08
