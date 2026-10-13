@@ -17,7 +17,8 @@
     "groq_model": "openai/gpt-oss-120b",
     "gemini_model": "gemini-flash-lite-latest",
     "max_rpm": 25,
-    "max_tpm": 8000
+    "max_tpm": 8000,
+    "primary": "gemini"
   },
   "tts": {
     "provider": "piper",

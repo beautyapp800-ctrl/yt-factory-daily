@@ -48,7 +48,11 @@ TRIM_RATIO = 1.20              # a lesson over target by this much is cut, not r
 MIN_SCENES, MAX_SCENES = 40, 60
 SCENE_TARGET, SCENE_MIN, SCENE_MAX = 92, 75, 110
 IMAGE_BATCH = 10
-MAX_FIX_ROUNDS = 3
+# Was 3, i.e. up to fifteen whole lessons re-run. With the digest each lesson
+# call is a third of what it was, but a rescue round is still the most expensive
+# thing this stage can do, so it keeps one attempt as a safety net rather than
+# three as a habit.
+MAX_FIX_ROUNDS = 1
 LESSONS_PER_FIX_ROUND = 5
 OUTLINE_ATTEMPTS = 3
 MAX_HOOK_TITLE_HITS = 2        # a hook naming more titles than this is previewing
@@ -323,13 +327,36 @@ Narration only."""
 
 # --- stage C: lessons and outro -------------------------------------------
 
+# How much of an earlier lesson travels into the next prompt. The reason to send
+# it at all is to stop repeats, and what repeats is the situation and the
+# example - both of which sit in the opening sentences. The rest was paid for on
+# every later call and never used.
+DIGEST_SENTENCES = 2
+DIGEST_CHARS = 320
+
+
+def lesson_digest(body):
+    """The part of a written lesson the next lesson needs in order not to repeat it.
+
+    Sending each earlier lesson in full made the prompts grow quadratically:
+    lesson ten carried nine whole lessons, roughly 3,400 words, and over a video
+    that cost more tokens than everything else in this stage put together.
+    """
+    sentences = txt.split_sentences(body or "")
+    digest = " ".join(sentences[:DIGEST_SENTENCES]).strip()
+    if len(digest) > DIGEST_CHARS:
+        digest = digest[:DIGEST_CHARS].rsplit(" ", 1)[0] + "..."
+    return digest
+
+
 def write_lesson(index, outline, written, target_words, cfg, setting, openings=(), tics=""):
-    """One lesson. Gets the whole plan plus what is already written, to avoid repeats."""
+    """One lesson. Gets the plan plus a digest of what is already written."""
     lesson = outline["lessons"][index]
     plan = "\n".join(f"{i}. {l['title']}: {l.get('focus', '')}"
                      for i, l in enumerate(outline["lessons"], 1))
-    already = "\n\n".join(f"Lesson {i + 1} ({outline['lessons'][i]['title']}):\n{body}"
-                          for i, body in sorted(written.items())) or "Nothing yet."
+    already = "\n".join(f"Lesson {i + 1} ({outline['lessons'][i]['title']}): "
+                        f"{lesson_digest(body)}"
+                        for i, body in sorted(written.items())) or "Nothing yet."
 
     prompt = f"""Video title: {outline['title']}
 Promise: {outline['promise']}
@@ -337,7 +364,7 @@ Promise: {outline['promise']}
 The full plan of {len(outline['lessons'])} lessons:
 {plan}
 
-Already written, do not repeat these points, examples or phrasings:
+Already covered - do not repeat these situations, examples or openings:
 {already}
 
 Now write lesson {index + 1}, {lesson['title']}. Focus: {lesson.get('focus', '')}

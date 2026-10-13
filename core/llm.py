@@ -62,6 +62,7 @@ def _settings():
             "gemini_model": block.get("gemini_model") or GEMINI_MODEL,
             "max_rpm": int(block.get("max_rpm") or MAX_RPM),
             "max_tpm": int(block.get("max_tpm") or MAX_TPM),
+            "primary": (block.get("primary") or "gemini").lower(),
         }
     return _settings_cache
 
@@ -192,7 +193,12 @@ def _call_groq(prompt, system, max_tokens, temperature, json_mode):
     # Reserve roughly what this call will cost before making it: prompt length
     # is known, the answer is bounded by max_tokens. Corrected below from the
     # usage the API reports, so the running total stays honest.
-    estimate = len(prompt) // 4 + len(system or "") // 4 + int(max_tokens)
+    # max_tokens is a ceiling, not a forecast: lessons ask for 2,370 and answer
+    # in about 500. Reserving the ceiling throttled the pipeline against a limit
+    # it was nowhere near. Reserve the prompt in full plus a realistic share of
+    # the ceiling, then correct from the reported usage below.
+    estimate = (len(prompt) // 4 + len(system or "") // 4
+                + min(int(max_tokens), int(max_tokens) // 3 + 200))
 
     for attempt in range(_MAX_429_WAITS):
         _rate_limit(estimate)
@@ -269,14 +275,32 @@ def _call_gemini(prompt, system, max_tokens, temperature, json_mode):
 
 @retry(attempts=3, base_delay=4)
 def complete(prompt, system=None, max_tokens=4096, temperature=0.8, json_mode=False):
-    """Groq, falling back to Gemini. Raises LLMError when no provider answers."""
-    try:
-        return _call_groq(prompt, system, max_tokens, temperature, json_mode)
-    except LLMError as groq_error:
-        if not get_key("GEMINI_API_KEY"):
-            raise
-        log.warning("groq failed (%s), falling back to gemini", groq_error)
-        return _call_gemini(prompt, system, max_tokens, temperature, json_mode)
+    """The configured primary provider, falling back to the other one.
+
+    Order is set by llm.primary in config.json. Groq led until a measured video
+    turned out to cost 215,000 tokens against a 200,000-a-day free ceiling - one
+    video a day did not fit, which is why the channel kept stopping. Gemini
+    leads now and Groq is the spare.
+    """
+    order = _settings().get("primary", "gemini")
+    providers = [("gemini", _call_gemini), ("groq", _call_groq)]
+    if order == "groq":
+        providers.reverse()
+
+    first_error = None
+    for name, call in providers:
+        key = "GEMINI_API_KEY" if name == "gemini" else "GROQ_API_KEY"
+        if not get_key(key):
+            log.info("%s has no key configured, skipping", name)
+            continue
+        try:
+            return call(prompt, system, max_tokens, temperature, json_mode)
+        except LLMError as e:
+            if first_error is None:
+                first_error = e
+            log.warning("%s failed (%s), trying the next provider", name, e)
+    raise first_error or LLMError("no provider is configured: set GEMINI_API_KEY "
+                                  "or GROQ_API_KEY")
 
 
 def extract_json(text):
