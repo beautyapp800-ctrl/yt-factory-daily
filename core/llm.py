@@ -26,8 +26,17 @@ GEMINI_MODEL = "gemini-flash-lite"
 USER_AGENT = "yt-factory/1.0"
 
 MAX_RPM = 25
+# Groq's free tier refuses on tokens per minute, not on requests, and this
+# pipeline's prompts grow as a script accumulates: the calls in one script stage
+# ran 565, 1615, 2249, 2859, 3420, 3991 tokens. Twenty-five requests a minute of
+# four-thousand-token calls is a hundred thousand tokens a minute, far past the
+# ceiling, so pacing by request count alone cannot keep inside it.
+MAX_TPM = 25_000
 _RATE_WINDOW = 60.0
-_MAX_429_WAITS = 5
+# Groq answers a 429 with "try again in Xs" and the code honours it. Five waits
+# was not enough patience to cross the busiest minute of a long script; the run
+# that failed had already finished most of its work.
+_MAX_429_WAITS = 12
 
 
 class LLMError(Exception):
@@ -51,6 +60,7 @@ def _settings():
             "groq_model": block.get("groq_model") or GROQ_MODEL,
             "gemini_model": block.get("gemini_model") or GEMINI_MODEL,
             "max_rpm": int(block.get("max_rpm") or MAX_RPM),
+            "max_tpm": int(block.get("max_tpm") or MAX_TPM),
         }
     return _settings_cache
 
@@ -98,19 +108,41 @@ _calls = []
 _calls_lock = Lock()
 
 
-def _rate_limit():
-    """Block until fewer than max_rpm calls sit inside the trailing 60s window."""
-    cap = _settings()["max_rpm"]
+def _rate_limit(estimated_tokens=0):
+    """Block until both the request and the token budget have room.
+
+    `_calls` holds (timestamp, tokens) for the trailing minute. Tokens are the
+    binding constraint on Groq's free tier; requests are kept as a second guard
+    because a burst of tiny calls can still trip the per-request limit.
+    """
+    settings = _settings()
+    cap, token_cap = settings["max_rpm"], settings["max_tpm"]
     while True:
         with _calls_lock:
             now = time.monotonic()
-            _calls[:] = [t for t in _calls if now - t < _RATE_WINDOW]
-            if len(_calls) < cap:
-                _calls.append(now)
+            _calls[:] = [c for c in _calls if now - c[0] < _RATE_WINDOW]
+            used = sum(c[1] for c in _calls)
+            room_for_calls = len(_calls) < cap
+            room_for_tokens = used + estimated_tokens <= token_cap
+            if room_for_calls and room_for_tokens:
+                _calls.append((now, estimated_tokens))
                 return
-            wait = _RATE_WINDOW - (now - _calls[0]) + 0.05
-        log.info("rate limit: %d calls in the last minute, waiting %.1fs", cap, wait)
-        time.sleep(wait)
+            oldest = _calls[0][0] if _calls else now
+            wait = _RATE_WINDOW - (now - oldest) + 0.05
+            reason = "tokens" if not room_for_tokens else "requests"
+        log.info("rate limit (%s): %d calls / %d tokens in the last minute, "
+                 "waiting %.1fs", reason, len(_calls), used, wait)
+        time.sleep(max(0.1, wait))
+
+
+def _record_actual(tokens):
+    """Correct the last reservation once the real usage is known."""
+    if not tokens:
+        return
+    with _calls_lock:
+        if _calls:
+            when, _ = _calls[-1]
+            _calls[-1] = (when, tokens)
 
 
 # --- http ------------------------------------------------------------------
@@ -156,8 +188,13 @@ def _call_groq(prompt, system, max_tokens, temperature, json_mode):
         # answer itself is not the part that gets cut off.
         payload["reasoning_effort"] = "low"
 
+    # Reserve roughly what this call will cost before making it: prompt length
+    # is known, the answer is bounded by max_tokens. Corrected below from the
+    # usage the API reports, so the running total stays honest.
+    estimate = len(prompt) // 4 + len(system or "") // 4 + int(max_tokens)
+
     for attempt in range(_MAX_429_WAITS):
-        _rate_limit()
+        _rate_limit(estimate)
         started = time.monotonic()
         status, body = _post(GROQ_URL, payload, {"Authorization": f"Bearer {key}"})
         elapsed = time.monotonic() - started
@@ -170,6 +207,8 @@ def _call_groq(prompt, system, max_tokens, temperature, json_mode):
             raise LLMError(f"groq HTTP {status}: {body[:400]}")
         data = json.loads(body)
         usage = data.get("usage") or {}
+        # Replace the pre-call estimate with what the call actually cost.
+        _record_actual(usage.get("total_tokens"))
         choice = data["choices"][0]
         log.info("groq %s | %s tokens (%s in, %s out) | %.1fs", model,
                  usage.get("total_tokens", "?"), usage.get("prompt_tokens", "?"),
