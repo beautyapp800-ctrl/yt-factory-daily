@@ -57,6 +57,10 @@ jobs:
     timeout-minutes: 300          # 5 hours for the whole job
     env:
       GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      # The fallback when Groq runs dry. core/llm.py skips Gemini
+      # entirely when this is unset, so without it there is no fallback
+      # at all - which is what the pipeline had until now.
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       POLLINATIONS_TOKEN: ${{ secrets.POLLINATIONS_TOKEN }}

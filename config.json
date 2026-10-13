@@ -15,8 +15,9 @@
   "lessons_per_video": 10,
   "llm": {
     "groq_model": "openai/gpt-oss-120b",
-    "gemini_model": "gemini-flash-lite",
-    "max_rpm": 25
+    "gemini_model": "gemini-flash-lite-latest",
+    "max_rpm": 25,
+    "max_tpm": 8000
   },
   "tts": {
     "provider": "piper",

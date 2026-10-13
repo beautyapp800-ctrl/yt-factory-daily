@@ -27,11 +27,12 @@ USER_AGENT = "yt-factory/1.0"
 
 MAX_RPM = 25
 # Groq's free tier refuses on tokens per minute, not on requests, and this
-# pipeline's prompts grow as a script accumulates: the calls in one script stage
-# ran 565, 1615, 2249, 2859, 3420, 3991 tokens. Twenty-five requests a minute of
-# four-thousand-token calls is a hundred thousand tokens a minute, far past the
-# ceiling, so pacing by request count alone cannot keep inside it.
-MAX_TPM = 25_000
+# pipeline's prompts grow as a script accumulates. Measured on one video: 57
+# calls, median 3,884 tokens, largest 6,912, 215,000 in total. The published
+# free-tier ceiling for this model is 8,000 tokens a minute, so a single call
+# can be most of a minute's budget and pacing by request count cannot stay
+# inside it.
+MAX_TPM = 8_000
 _RATE_WINDOW = 60.0
 # Groq answers a 429 with "try again in Xs" and the code honours it. Five waits
 # was not enough patience to cross the busiest minute of a long script; the run

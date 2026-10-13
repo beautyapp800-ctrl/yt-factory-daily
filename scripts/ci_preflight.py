@@ -73,6 +73,23 @@ def main():
         problems.append(f"the configured TTS provider '{provider}' cannot speak "
                         f"from this machine: {e}.{hint}")
 
+    # The fallback is only a fallback if it answers. It sat unconfigured and
+    # pointed at a model id that 404s, so the day Groq ran dry there was nothing
+    # behind it - and that is a failure nobody sees until it is the only thing
+    # left.
+    try:
+        from core import llm
+        if not llm.get_key("GEMINI_API_KEY"):
+            print("gemini fallback: NOT CONFIGURED (no GEMINI_API_KEY)")
+            problems.append("no Gemini fallback: GROQ is the only provider, so a "
+                            "Groq outage or exhausted daily quota stops the channel")
+        else:
+            reply = llm._call_gemini("Reply with OK.", None, 64, 0.0, False)
+            print(f"gemini fallback: answers ({reply.strip()[:20]})")
+    except Exception as e:                                       # noqa: BLE001
+        print(f"gemini fallback: FAILED: {e}")
+        problems.append(f"the Gemini fallback does not answer: {e}")
+
     try:
         from core import youtube
         creds = youtube.load_credentials()
