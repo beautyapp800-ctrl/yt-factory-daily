@@ -31,6 +31,7 @@ import json
 import re
 
 from core import db, text as txt
+from core.concede import concede
 from core.config import output_dir
 from core.llm import complete_json
 from core.logger import get_logger
@@ -259,14 +260,22 @@ def run(video_id, cfg):
             break
         log.warning("seo attempt %d/%d rejected: %s", attempt, ATTEMPTS, "; ".join(complaints))
     if complaints:
-        raise RuntimeError(f"seo metadata still invalid after {ATTEMPTS} attempts: "
-                           f"{'; '.join(complaints)}")
+        concede(video_id, "seo",
+                f"metadata still imperfect after {ATTEMPTS} attempts: "
+                f"{'; '.join(complaints)}",
+                using="the best attempt")
 
     chapters = chapter_lines(video_id, lessons)
     description = build_description(data["hook"], data["summary"], chapters)
     if len(description) > MAX_DESCRIPTION:
-        raise RuntimeError(f"description is {len(description)} characters, YouTube's limit "
-                           f"is {MAX_DESCRIPTION}")
+        # A hard YouTube limit, so this one is repaired rather than conceded:
+        # cut at a line break so the description does not end mid-sentence.
+        cut = description.rfind("\n", 0, MAX_DESCRIPTION - 1)
+        description = description[:cut if cut > MAX_DESCRIPTION // 2
+                                  else MAX_DESCRIPTION - 1].rstrip()
+        concede(video_id, "seo",
+                f"description ran past YouTube's {MAX_DESCRIPTION} characters",
+                using=f"the first {len(description)} characters")
     tags = _final_tags(data["tags"])
     seo_title = data["title"].strip()
     if not _NUMBER.search(seo_title):

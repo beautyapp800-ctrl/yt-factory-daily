@@ -229,16 +229,19 @@ def test_a_relaxed_plan_is_written_down_not_waved_through():
     check(any("9 words" in c for c in outline["relaxed"]),
           f"naming the actual rule, not just 'relaxed' ({outline['relaxed'][:2]})")
 
-    # A banned word is still fatal, however many attempts it survives.
+    # A banned word used to be fatal. Nothing is fatal here now: the outline
+    # is taken, and the word it kept is written down so the relaxation can be
+    # counted rather than guessed at.
     plan["lessons"] = [{"title": "Ten Tips To Fix Your Morning", "focus": "About work."}
                        for _ in range(10)]
     sc.complete_json = fake_model
     try:
-        sc.make_outline({"topic": "t", "promise": "p", "different": "d", "seed": "habit"},
-                        {"target_duration_min": 30}, 10)
-        check(False, "a banned word should still throw the video away")
-    except RuntimeError as e:
-        check("banned word" in str(e), f"and says which word did it ({e})")
+        outline = sc.make_outline(
+            {"topic": "t", "promise": "p", "different": "d", "seed": "habit"},
+            {"target_duration_min": 30}, 10)
+        check(outline.get("relaxed"), "the outline is taken with the rule recorded")
+        check(any("banned word" in c for c in outline["relaxed"]),
+              f"and says which word survived ({outline['relaxed'][:2]})")
     finally:
         sc.complete_json = real
 

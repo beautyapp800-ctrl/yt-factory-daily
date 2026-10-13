@@ -13,11 +13,13 @@ import numpy as np
 from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 import core.logger
 core.logger.LOG_DIR = Path(tempfile.mkdtemp(prefix="yt-factory-test-"))
 
 from core import config, db
+import notify
 import core.images as image_api
 import pipeline.cover_image as cover
 import pipeline.phrase as phrase
@@ -316,17 +318,24 @@ def _events(vid):
         return [dict(r) for r in conn.execute("SELECT * FROM events WHERE video_id = ?", (vid,))]
 
 
-def test_no_title_raises(tmp):
-    print("test_no_title_raises")
+def test_no_title_is_conceded_not_fatal(tmp):
+    print("test_no_title_is_conceded_not_fatal")
     db.DB_PATH = tmp / "notitle.db"
     config.OUTPUT_DIR = tmp / "out_notitle"
     db.init_db()
     vid = db.create_video("x")
+    # A missing seo title used to end the stage here. It now falls back to the
+    # topic and carries on, so this test only has to show that it got past the
+    # title; whatever stops it later (the network guard, in this suite) is not
+    # the point.
     try:
         thumb.run(vid, {})
-        check(False, "no title should raise")
-    except RuntimeError as e:
-        check("title" in str(e), "the error names the actual problem")
+    except BaseException:                                        # noqa: BLE001
+        pass
+    conceded = [str(e.get("message", "")) for e in notify.run_events(vid)
+                if "shipped anyway" in str(e.get("message", ""))]
+    check(any("no title" in m for m in conceded),
+          f"the missing title was conceded, not raised ({conceded})")
 
 
 # --- the phrase --------------------------------------------------------------------------
@@ -517,7 +526,7 @@ if __name__ == "__main__":
         test_the_feed_size_check_can_say_no(tmp)
         test_run_uses_the_seo_title_and_records_what_it_did(tmp)
         test_a_failed_phrase_falls_back_loudly_not_quietly(tmp)
-        test_no_title_raises(tmp)
+        test_no_title_is_conceded_not_fatal(tmp)
         test_the_phrase_rules_refuse_what_the_brief_names()
         test_every_example_in_the_prompt_obeys_the_prompt()
         test_a_rejected_phrase_is_asked_for_again_with_the_reason()

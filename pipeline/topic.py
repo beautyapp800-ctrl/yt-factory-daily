@@ -4,6 +4,7 @@ import random
 from difflib import SequenceMatcher
 
 from core import db
+from core.concede import concede
 from core.config import ASSETS_DIR, output_dir
 from core.llm import complete_json
 from core.logger import get_logger
@@ -103,4 +104,18 @@ def run(video_id, cfg):
         db.log_event(video_id, "topic", "info", f"topic chosen from seed '{seed['theme']}': {concept['topic']}")
         return True
 
-    raise RuntimeError(f"no usable topic after {len(candidates)} attempts")
+    # The model refusing to phrase a concept is not a reason to skip a day:
+    # the seed itself carries a theme and angle hints, which is enough to
+    # write from. The topic will be blunter than usual, and recorded as such.
+    seed = candidates[0]
+    hint = (seed.get("angle_hints") or [""])[0]
+    concept = {"topic": " ".join(f"{seed['theme']} {hint}".split())[:70].strip(),
+               "promise": "", "different": "", "seed": seed["theme"],
+               "angle_hints": seed.get("angle_hints", [])}
+    db.update_video(video_id, topic=concept["topic"], seed=seed["theme"])
+    (output_dir(video_id) / "concept.json").write_text(
+        json.dumps(concept, indent=2, ensure_ascii=False), encoding="utf-8")
+    concede(video_id, "topic",
+            f"no usable concept after {len(candidates)} attempts",
+            using=f"the seed theme directly: {concept['topic']}")
+    return True

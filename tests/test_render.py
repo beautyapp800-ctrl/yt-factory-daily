@@ -11,6 +11,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 # Keep test output out of the working logs/factory.log.
 import core.logger
@@ -18,6 +19,7 @@ core.logger.LOG_DIR = Path(tempfile.mkdtemp(prefix="yt-factory-test-"))
 
 from core import config, db, music, render
 import pipeline.render as stage
+import notify
 
 
 def check(cond, msg):
@@ -502,11 +504,13 @@ def test_black_first_frame_raises(tmp):
     fake.brightness = 2.0   # looks black
     original = _install_fake(fake)
     try:
-        try:
-            stage.run(vid, {"render": RENDER_CFG})
-            check(False, "a black first/last frame should raise")
-        except RuntimeError as e:
-            check("black" in str(e), f"the error names the actual problem ({e})")
+        # A nearly black edge frame is a note now, not a verdict: the render
+        # exists and is worth publishing, and the concession is in the email.
+        check(stage.run(vid, {"render": RENDER_CFG}), "the render still completes")
+        conceded = [e for e in notify.run_events(vid)
+                    if "shipped anyway" in str(e.get("message", ""))]
+        check(any("black" in str(e.get("message", "")) for e in conceded),
+              f"and the dark frame is named on the record ({conceded})")
     finally:
         _restore(original)
 
@@ -524,11 +528,13 @@ def test_duration_mismatch_raises(tmp):
                 return 9999.0
             return real_probe(path)
         fake.probe_duration = bad_probe
-        try:
-            stage.run(vid, {"render": RENDER_CFG})
-            check(False, "a large video/audio duration mismatch should raise")
-        except RuntimeError as e:
-            check("apart" in str(e) or "s but" in str(e), f"the error is specific ({e})")
+        # The drift is recorded rather than thrown: a video out of step with
+        # its narration is a problem to look at, not a day to lose.
+        check(stage.run(vid, {"render": RENDER_CFG}), "the render still completes")
+        conceded = [str(e.get("message", "")) for e in notify.run_events(vid)
+                    if "shipped anyway" in str(e.get("message", ""))]
+        check(any("apart" in m for m in conceded),
+              f"and the drift is named on the record ({conceded})")
     finally:
         _restore(original)
 

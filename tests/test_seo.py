@@ -214,15 +214,13 @@ def test_gives_up_after_three_attempts(tmp):
     vid = _setup_video(tmp, "giveup")
     calls, original = _stub_llm([{**GOOD2, "title": "A: B"}])
     try:
-        try:
-            seo.run(vid, {})
-            check(False, "an answer that never gets better should fail the stage")
-        except RuntimeError as e:
-            check("colon" in str(e), f"the error names the actual problem ({e})")
+        # Three tries, then the best answer is used. A title with a colon in it
+        # is a blemish; a video that never reaches the channel is not.
+        check(seo.run(vid, {}), "the stage still finishes")
     finally:
         seo.complete_json = original
     check(len(calls) == 3, f"it stopped after exactly 3 attempts ({len(calls)})")
-    check(db.get_video(vid)["seo_title"] is None, "nothing half-valid was written")
+    check(db.get_video(vid)["seo_title"], "and the best attempt was written")
 
 
 def test_no_timings_means_no_chapter_list(tmp):

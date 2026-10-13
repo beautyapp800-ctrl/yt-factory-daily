@@ -38,6 +38,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageEnhance, ImageFont
 
 from core import db, ocr
+from core.concede import concede
 from core.config import output_dir
 from pipeline import cover_image, phrase as phrase_writer
 from core.logger import get_logger
@@ -657,7 +658,10 @@ def run(video_id, cfg):
     video = db.get_video(video_id) or {}
     title = video.get("seo_title") or video.get("title")
     if not title:
-        raise RuntimeError("the video has no title to take the thumbnail words from")
+        # Better a plain card than no thumbnail and no video.
+        title = (db.get_video(video_id) or {}).get("topic") or "Stoic Lessons"
+        concede(video_id, "thumbnail", "the video has no title yet",
+                using=f"the topic instead: {title}")
 
     accent_name, accent = accent_for(video_id)
     options, phrase, fallback_note = _phrase_for(video_id, title, cfg)

@@ -186,26 +186,47 @@ def test_a_script_of_the_wrong_length_is_written_again(tmp):
 
 def test_the_window_is_27_to_33_inclusive(tmp):
     print("test_the_window_is_27_to_33_inclusive")
-    for minutes, expected in ((26.9, False), (27.0, True), (30.0, True), (33.0, True), (33.1, False)):
+    # The window still decides whether a script is rewritten; it no longer
+    # decides whether the day gets a video. Outside it, the run rewrites, and
+    # when the rewrites run out it ships what it has and says so.
+    for minutes, inside in ((26.9, False), (27.0, True), (30.0, True),
+                            (33.0, True), (33.1, False)):
         vid, ok, log = _gate_run(tmp, f"edge{minutes}", [minutes, minutes, minutes])
-        check(ok == expected, f"{minutes} minutes is {'accepted' if expected else 'rejected'}")
+        check(ok, f"{minutes} minutes still produces a video")
+        rewrites = log.count("script") - 1
+        if inside:
+            check(rewrites == 0, f"{minutes} minutes is inside, so nothing is rewritten")
+        else:
+            check(rewrites > 0, f"{minutes} minutes is outside, so the script is rewritten")
+            conceded = [e for e in notify.run_events(vid)
+                        if "shipped anyway" in str(e.get("message", ""))]
+            check(conceded, f"{minutes} minutes is recorded as conceded, not hidden")
 
 
-def test_three_bad_scripts_in_a_row_fail_the_video(tmp):
-    print("test_three_bad_scripts_in_a_row_fail_the_video")
+def test_three_bad_scripts_in_a_row_still_publish(tmp):
+    print("test_three_bad_scripts_in_a_row_still_publish")
+    # This used to fail the video. A day with nothing on the channel is the
+    # one outcome the pipeline is not allowed to choose, so after the
+    # rewrites are spent the narration it has is the narration it ships.
     vid, ok, log = _gate_run(tmp, "never", [25.0, 24.0, 36.0])
-    check(not ok, "the run fails")
-    check(log.count("script") == 3 and "images" not in log,
-          f"three scripts were written and the pictures were never paid for ({log})")
+    check(ok, "the run still produces a video")
+    check(log.count("script") == 3,
+          f"three scripts were written before giving up on the length ({log})")
+    check("render" in log, f"and the video was actually rendered ({log})")
     video = db.get_video(vid)
-    check(video["status"] == "failed" and "gave up after 3 scripts" in video["error"],
-          f"the error says why ({video['error']})")
+    check(video["status"] == "ready", f"the video ends ready, not failed ({video['status']})")
+    conceded = [e for e in notify.run_events(vid)
+                if "shipped anyway" in str(e.get("message", ""))]
+    check(conceded, "and the length it settled for is on the record")
 
 
 def test_the_gate_reads_its_window_from_config(tmp):
     print("test_the_gate_reads_its_window_from_config")
     vid, ok, log = _gate_run(tmp, "narrow", [30.0], gate={"min_minutes": 31, "max_minutes": 33, "attempts": 1})
-    check(not ok, "a 30 minute narration fails a 31-33 window, with one attempt allowed")
+    check(ok, "a 30 minute narration against a 31-33 window still ships")
+    check([e for e in notify.run_events(vid)
+           if "shipped anyway" in str(e.get("message", ""))],
+          "the window came from config and the miss was recorded")
 
 
 # --- the daily message -------------------------------------------------------------------
@@ -596,7 +617,7 @@ if __name__ == "__main__":
         test_a_failed_run_resumes_at_the_stage_that_failed(tmp)
         test_a_script_of_the_wrong_length_is_written_again(tmp)
         test_the_window_is_27_to_33_inclusive(tmp)
-        test_three_bad_scripts_in_a_row_fail_the_video(tmp)
+        test_three_bad_scripts_in_a_row_still_publish(tmp)
         test_the_gate_reads_its_window_from_config(tmp)
         test_the_success_message_says_where_and_when(tmp)
         test_the_failure_message_says_which_stage_and_what_happens_next(tmp)

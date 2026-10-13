@@ -13,6 +13,7 @@ import random
 import re
 
 from core import db, text as txt
+from core.concede import concede, impossible
 from core.config import output_dir
 from core.llm import complete, complete_json
 from core.logger import get_logger
@@ -285,8 +286,12 @@ def make_outline(concept, cfg, lesson_count, tics=""):
             outline["relaxed"] = sorted(dict.fromkeys(complaints))
             return outline
 
-    raise RuntimeError("outline still breaks the title rules after "
-                       f"{OUTLINE_ATTEMPTS} attempts: {fatal[0] if fatal else complaints[0]}")
+    # Even a rule marked worth-losing-a-day-for is not worth losing the day:
+    # a clumsy lesson title is visible for a moment, a missing video all day.
+    outline["relaxed"] = sorted(dict.fromkeys(complaints))
+    log.warning("outline still breaks the rules after %d attempts, taking it anyway: %s",
+                OUTLINE_ATTEMPTS, fatal[0] if fatal else complaints[0])
+    return outline
 
 
 # --- shared prompt fragments ----------------------------------------------
@@ -862,11 +867,14 @@ def run(video_id, cfg):
 
     if not fix_word_count(parts, outline, budget, cfg, regenerate):
         total = sum(txt.word_count(p) for p in parts.values())
-        raise RuntimeError(
-            f"script is {total} words, outside "
-            f"{WORD_TOLERANCE:.0%} of the {budget} word budget "
-            f"({budget * (1 - WORD_TOLERANCE):.0f}-"
-            f"{budget * (1 + WORD_TOLERANCE):.0f})")
+        # The budget is a target, not a verdict. A script a few hundred words
+        # off centre still reads inside the 27-33 minute window; throwing it
+        # away guarantees no video at all.
+        concede(video_id, "script",
+                f"{total} words against a {budget} budget "
+                f"({budget * (1 - WORD_TOLERANCE):.0f}-"
+                f"{budget * (1 + WORD_TOLERANCE):.0f} wanted)",
+                using="the script as written")
 
     full_text = assemble(parts, lesson_count)
     total_words = txt.word_count(full_text)
@@ -878,10 +886,15 @@ def run(video_id, cfg):
 
     problems = check_scenes(scenes, prompts)
     if problems:
+        # Scenes that break a rule still render. Having no scenes at all is
+        # the only version of this that cannot be worked around.
+        if not scenes:
+            raise impossible("script", "no scenes were built from the script")
         for problem in problems:
-            log.error("validation: %s", problem)
-            db.log_event(video_id, "script", "error", f"validation: {problem}")
-        raise RuntimeError(f"script validation failed: {problems[0]}")
+            log.warning("validation: %s", problem)
+        concede(video_id, "script",
+                f"{len(problems)} scene rule(s) broken, first: {problems[0]}",
+                using=f"{len(scenes)} scenes as built")
 
     for opener in txt.banned_openers(full_text):
         # Style slip, not a reason to throw away a finished script.

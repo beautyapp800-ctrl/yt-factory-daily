@@ -32,6 +32,7 @@ import time
 from pathlib import Path
 
 from core import db, music, render
+from core.concede import concede
 from core.config import output_dir
 from core.logger import get_logger
 
@@ -416,19 +417,21 @@ def run(video_id, cfg):
     final_duration = render.probe_duration(final_path)
     audio_duration = render.probe_duration(voice_path)
     if abs(final_duration - audio_duration) > DURATION_TOLERANCE_S:
-        raise RuntimeError(f"final.mp4 is {final_duration:.1f}s but voice.mp3 is "
-                           f"{audio_duration:.1f}s, more than {DURATION_TOLERANCE_S}s apart")
+        concede(video_id, "render",
+                f"video is {final_duration:.1f}s against {audio_duration:.1f}s of "
+                f"narration, {abs(final_duration - audio_duration):.1f}s apart",
+                using="the render as produced")
     log.info("duration check: video %.1fs vs audio %.1fs (within %.0fs)",
              final_duration, audio_duration, DURATION_TOLERANCE_S)
 
     first_brightness = render.frame_brightness(final_path, 0.1)
     last_brightness = render.frame_brightness(final_path, max(0.1, final_duration - 0.5))
-    if first_brightness < MIN_BRIGHTNESS:
-        raise RuntimeError(f"final.mp4's first frame is black (mean brightness "
-                           f"{first_brightness:.1f})")
-    if last_brightness < MIN_BRIGHTNESS:
-        raise RuntimeError(f"final.mp4's last frame is black (mean brightness "
-                           f"{last_brightness:.1f})")
+    for edge, value in (("first", first_brightness), ("last", last_brightness)):
+        if value < MIN_BRIGHTNESS:
+            concede(video_id, "render",
+                    f"the {edge} frame is nearly black (brightness {value:.1f}, "
+                    f"floor {MIN_BRIGHTNESS})",
+                    using="the render as produced")
     log.info("brightness check: first frame %.1f, last frame %.1f (floor %d)",
              first_brightness, last_brightness, MIN_BRIGHTNESS)
 
