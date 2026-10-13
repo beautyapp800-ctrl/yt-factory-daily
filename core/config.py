@@ -35,4 +35,33 @@ def load_config(path=CONFIG_PATH):
     missing = [k for k in REQUIRED_FIELDS if k not in cfg]
     if missing:
         raise ConfigError(f"Missing required config fields: {', '.join(missing)}")
+    cfg["words_per_minute"] = speaking_wpm(cfg)
     return cfg
+
+
+def speaking_wpm(cfg):
+    """The speaking rate of the voice that is actually going to read the script.
+
+    The word budget is derived from this number, so the two have to describe
+    the same voice. They did not: 166 wpm was measured on edge-tts, the
+    provider was switched to piper, and piper at length_scale 1.08 speaks
+    217 wpm. A 4783-word script - a normal one by the budget - came out at
+    23.7 minutes against a 27-33 minute window, the pipeline called the script
+    the fault and rewrote it shorter, and that rewrite then failed the budget
+    gate. Two whole days of publication were lost to a number that belonged to
+    a voice no longer in use.
+
+    So the rate lives in the provider's own block and is read from the active
+    one. A provider with no measured rate is an error rather than a silent
+    borrow from whichever voice was measured last.
+    """
+    tts_cfg = cfg.get("tts") or {}
+    provider = tts_cfg.get("provider")
+    block = tts_cfg.get(provider) or {}
+    measured = block.get("measured_wpm")
+    if measured:
+        return int(measured)
+    raise ConfigError(
+        f"tts.{provider}.measured_wpm is not set, so the word budget would be "
+        f"derived from a rate measured on a different voice. Measure it with "
+        f"scripts/calibrate_tempo.py and write it into config.json.")

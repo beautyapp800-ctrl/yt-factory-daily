@@ -228,13 +228,21 @@ def _call_groq(prompt, system, max_tokens, temperature, json_mode):
     estimate = (len(prompt) // 4 + len(system or "") // 4
                 + min(int(max_tokens), int(max_tokens) // 3 + 200))
 
+    waited = 0.0
     for attempt in range(_MAX_429_WAITS):
         _rate_limit(estimate)
         started = time.monotonic()
         status, body = _post(GROQ_URL, payload, {"Authorization": f"Bearer {key}"})
         elapsed = time.monotonic() - started
         if status == 429:
+            if _is_daily_quota(body):
+                raise LLMError(
+                    f"groq daily quota is used up, falling over: {body[:200]}")
             wait = _retry_after_seconds(body, attempt)
+            waited += wait
+            if waited > _MAX_WAIT_PER_CALL_S:
+                raise LLMError(
+                    f"groq rate-limited {waited:.0f}s on one call, falling over")
             log.warning("groq 429 (attempt %d/%d), waiting %.1fs", attempt + 1, _MAX_429_WAITS, wait)
             time.sleep(wait)
             continue

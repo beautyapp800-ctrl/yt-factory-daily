@@ -840,7 +840,11 @@ def run(video_id, cfg):
 
     if not fix_word_count(parts, outline, budget, cfg, regenerate):
         total = sum(txt.word_count(p) for p in parts.values())
-        raise RuntimeError(f"script is {total} words, outside 15% of the {budget} word budget")
+        raise RuntimeError(
+            f"script is {total} words, outside "
+            f"{WORD_TOLERANCE:.0%} of the {budget} word budget "
+            f"({budget * (1 - WORD_TOLERANCE):.0f}-"
+            f"{budget * (1 + WORD_TOLERANCE):.0f})")
 
     full_text = assemble(parts, lesson_count)
     total_words = txt.word_count(full_text)

@@ -24,11 +24,15 @@
     "provider": "piper",
     "piper": {
       "voice": "en_US-ryan-high",
-      "length_scale": 1.08
+      "length_scale": 1.56,
+      "measured_wpm": 165,
+      "pace_note": "length_scale 1.56 measured at 165.3 wpm on a 140-word excerpt (1.08 measured 217.5). wpm x length_scale is about 253 in this range, so re-measure rather than scaling if the voice changes."
     },
     "edge": {
       "voice": "en-US-AndrewMultilingualNeural",
-      "rate": "-5%"
+      "rate": "-5%",
+      "measured_wpm": 166,
+      "pace_note": "166 is the pooled rate from two whole videos (169.8 and 162.7) read by en-US-AndrewMultilingualNeural at -5%."
     },
     "pauses": {
       "sentence_ms": 220,
