@@ -1,0 +1,41 @@
+name: Tests
+
+# The whole test suite is offline and takes under a minute, and the policy it
+# pins down - that no check may cost the channel a day - was rewritten across
+# seven modules at once. A regression there is not visible until a publication
+# is already missed, which is the one failure this repository cannot afford.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install -r requirements-piper.txt
+      - name: Run every test file
+        env:
+          PYTHONUTF8: 1
+        run: |
+          failed=0
+          for t in tests/test_*.py; do
+            echo "::group::$t"
+            if python -X utf8 "$t"; then
+              echo "PASSED $t"
+            else
+              echo "::error::$t failed"
+              failed=1
+            fi
+            echo "::endgroup::"
+          done
+          exit $failed
