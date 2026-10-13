@@ -38,6 +38,10 @@ _RATE_WINDOW = 60.0
 # was not enough patience to cross the busiest minute of a long script; the run
 # that failed had already finished most of its work.
 _MAX_429_WAITS = 12
+# No single call may spend longer than this waiting out 429s before it gives up
+# and lets the other provider try. Twelve exponential waits total eighteen
+# minutes, which is a silent stall rather than a retry.
+_MAX_WAIT_PER_CALL_S = 150.0
 
 
 class LLMError(Exception):
@@ -125,9 +129,13 @@ def _rate_limit(estimated_tokens=0):
             _calls[:] = [c for c in _calls if now - c[0] < _RATE_WINDOW]
             used = sum(c[1] for c in _calls)
             room_for_calls = len(_calls) < cap
-            room_for_tokens = used + estimated_tokens <= token_cap
+            # A prompt larger than the entire per-minute budget could never
+            # fit, and this loop would spin on it forever: reserve the whole
+            # budget and let the API be the one to object.
+            want = min(estimated_tokens, token_cap)
+            room_for_tokens = used + want <= token_cap
             if room_for_calls and room_for_tokens:
-                _calls.append((now, estimated_tokens))
+                _calls.append((now, want))
                 return
             oldest = _calls[0][0] if _calls else now
             wait = _RATE_WINDOW - (now - oldest) + 0.05
@@ -165,11 +173,31 @@ def _post(url, payload, headers, timeout=180):
 
 
 def _retry_after_seconds(body, attempt):
-    """Seconds to wait after a 429. Honours the API's own hint when it gives one."""
+    """Seconds to wait after a 429. Honours the API's own hint when it gives one.
+
+    The two providers phrase the hint differently: Groq writes it into the
+    message ("try again in 7.5s"), Gemini returns a RetryInfo detail with
+    retryDelay. Reading only Groq's phrasing meant every Gemini 429 fell
+    through to the exponential ladder below, which is how one run spent
+    eighteen minutes per call waiting out a quota that resets tomorrow.
+    """
     match = re.search(r"try again in ([\d.]+)s", body)
     if match:
         return min(float(match.group(1)) + 1.0, 120.0)
+    match = re.search(r'"retryDelay"\s*:\s*"([\d.]+)s"', body)
+    if match:
+        return min(float(match.group(1)) + 1.0, 120.0)
     return min(5.0 * 2 ** attempt, 120.0)
+
+
+def _is_daily_quota(body):
+    """True when a 429 is a per-day allowance rather than a per-minute burst.
+
+    Waiting is pointless here - the free tier allows twenty requests a day per
+    model, and one video needs more than that - so the call should fail over to
+    the other provider at once instead of sleeping.
+    """
+    return bool(re.search(r"PerDay|per day|requests per day", body, re.I))
 
 
 # --- providers -------------------------------------------------------------
@@ -244,13 +272,21 @@ def _call_gemini(prompt, system, max_tokens, temperature, json_mode):
     model = _settings()["gemini_model"]
     url = GEMINI_URL.format(model=model)
 
+    waited = 0.0
     for attempt in range(_MAX_429_WAITS):
         _rate_limit()
         started = time.monotonic()
         status, body = _post(url, payload, {"x-goog-api-key": key})
         elapsed = time.monotonic() - started
         if status == 429:
+            if _is_daily_quota(body):
+                raise LLMError(
+                    f"gemini daily quota is used up, falling over: {body[:200]}")
             wait = _retry_after_seconds(body, attempt)
+            waited += wait
+            if waited > _MAX_WAIT_PER_CALL_S:
+                raise LLMError(
+                    f"gemini rate-limited {waited:.0f}s on one call, falling over")
             log.warning("gemini 429 (attempt %d/%d), waiting %.1fs", attempt + 1, _MAX_429_WAITS, wait)
             time.sleep(wait)
             continue
