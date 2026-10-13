@@ -73,22 +73,34 @@ def main():
         problems.append(f"the configured TTS provider '{provider}' cannot speak "
                         f"from this machine: {e}.{hint}")
 
-    # The fallback is only a fallback if it answers. It sat unconfigured and
-    # pointed at a model id that 404s, so the day Groq ran dry there was nothing
-    # behind it - and that is a failure nobody sees until it is the only thing
-    # left.
-    try:
-        from core import llm
-        if not llm.get_key("GEMINI_API_KEY"):
-            print("gemini fallback: NOT CONFIGURED (no GEMINI_API_KEY)")
-            problems.append("no Gemini fallback: GROQ is the only provider, so a "
-                            "Groq outage or exhausted daily quota stops the channel")
-        else:
-            reply = llm._call_gemini("Reply with OK.", None, 64, 0.0, False)
-            print(f"gemini fallback: answers ({reply.strip()[:20]})")
-    except Exception as e:                                       # noqa: BLE001
-        print(f"gemini fallback: FAILED: {e}")
-        problems.append(f"the Gemini fallback does not answer: {e}")
+    # Both providers are probed, and the run is only blocked when neither
+    # answers. Failing the whole run because one of the two is down is how a
+    # Gemini "high demand" 503 - which lasts minutes and which the pipeline
+    # already fails over from - came to stop a day's publication outright.
+    from core import llm
+    primary = (llm._settings() or {}).get("primary", "gemini")
+    working = []
+    for name, call in (("groq", llm._call_groq), ("gemini", llm._call_gemini)):
+        key = "GROQ_API_KEY" if name == "groq" else "GEMINI_API_KEY"
+        role = "primary" if name == primary else "fallback"
+        if not llm.get_key(key):
+            print(f"llm {name} ({role}): NOT CONFIGURED (no {key})")
+            continue
+        try:
+            reply = call("Reply with OK.", None, 64, 0.0, False)
+            print(f"llm {name} ({role}): answers ({reply.strip()[:20]})")
+            working.append(name)
+        except Exception as e:                                   # noqa: BLE001
+            print(f"llm {name} ({role}): FAILED: {e}")
+    if not working:
+        problems.append("neither Groq nor Gemini answers, so no script can be "
+                        "written; the run would produce nothing")
+    elif len(working) == 1:
+        print(f"llm: only {working[0]} is answering - the run can proceed, but "
+              f"there is nothing behind it if it fails")
+    if primary not in working and working:
+        print(f"llm: the configured primary '{primary}' is not answering; "
+              f"the pipeline will fall over to {working[0]}")
 
     try:
         from core import youtube
