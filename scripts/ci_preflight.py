@@ -46,19 +46,32 @@ def main():
         if not found:
             problems.append(f"{tool} is not installed on this runner")
 
+    # Name the provider that is actually configured. This message used to say
+    # "edge-tts ... if this is a 403, Microsoft is refusing the runner" no matter
+    # what, so a missing piper module read as a Microsoft block and sent the
+    # reader hunting the wrong fault entirely.
+    provider = "unknown"
     try:
         from core import tts
         from core.config import load_config
         cfg = load_config()
+        provider = (cfg.get("tts", {}) or {}).get("provider", "unknown")
         with tempfile.TemporaryDirectory() as tmp:
             seconds = tts.synthesize("This is a short test of the narrator's voice.",
                                      Path(tmp) / "preflight.wav", cfg)
-        print(f"edge-tts: spoke {seconds:.1f}s of audio")
+        print(f"tts[{provider}]: spoke {seconds:.1f}s of audio")
     except Exception as e:                                       # noqa: BLE001
-        print(f"edge-tts: FAILED: {e}")
-        problems.append(f"edge-tts cannot speak from this machine: {e}. If this is a 403, "
-                        "Microsoft is refusing the runner's address; see the README, section "
-                        "on running in CI, for the fallback.")
+        print(f"tts[{provider}]: FAILED: {e}")
+        hint = ""
+        if provider == "edge":
+            hint = (" If this is a 403, Microsoft is refusing the runner's address; "
+                    "see the README, section on running in CI, for the fallback.")
+        elif provider == "piper":
+            hint = (" piper needs both the package (requirements-piper.txt) and the "
+                    "voice model in assets/voices/, which is gitignored and must be "
+                    "downloaded by the workflow.")
+        problems.append(f"the configured TTS provider '{provider}' cannot speak "
+                        f"from this machine: {e}.{hint}")
 
     try:
         from core import youtube
