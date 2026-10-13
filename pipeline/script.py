@@ -52,7 +52,11 @@ IMAGE_BATCH = 10
 # call is a third of what it was, but a rescue round is still the most expensive
 # thing this stage can do, so it keeps one attempt as a safety net rather than
 # three as a habit.
-MAX_FIX_ROUNDS = 1
+# Back to 2. Cutting this to 1 to save tokens cost videos 17 and 18: a script
+# that lands short gets one attempt at being lengthened, and when that attempt
+# also lands short the whole script is thrown away and the day is lost. A
+# second round costs a few thousand tokens; a missed publication costs a day.
+MAX_FIX_ROUNDS = 2
 LESSONS_PER_FIX_ROUND = 5
 OUTLINE_ATTEMPTS = 3
 MAX_HOOK_TITLE_HITS = 2        # a hook naming more titles than this is previewing
