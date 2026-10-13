@@ -43,7 +43,15 @@ WORD_TOLERANCE = 0.04
 # different amounts, because trim_to_budget() fixes an over-long script for free while a
 # short one has to be bought back with rewrites, so the order now aims at the full target
 # and lets trimming take back any excess.
-ORDER_RATIO = 1.0
+# The model under-delivers against the per-lesson figure it is given, and
+# consistently: asked for 441 words in run 27 it returned ten lessons
+# averaging 360 (82%), and the five it redrew came back at 366-390 (86%).
+# Ten lessons at 385 plus hook and outro is 4191 words against a 4578 floor,
+# so asking for exactly the target could not reach the window no matter how
+# many repair rounds ran - videos 18 and 19 both died that way. 1.18 asks for
+# ~520 to receive ~435. It is a correction for measured under-delivery, not a
+# change to the finished length, which is still the 4769 word budget.
+ORDER_RATIO = 1.18
 TRIM_RATIO = 1.20              # a lesson over target by this much is cut, not redone
 MIN_SCENES, MAX_SCENES = 40, 60
 SCENE_TARGET, SCENE_MIN, SCENE_MAX = 92, 75, 110
@@ -724,9 +732,19 @@ def fix_word_count(parts, outline, budget, cfg, regenerate):
                           key=lambda i: txt.word_count(parts[("lesson", i)])
                           )[:LESSONS_PER_FIX_ROUND]
         for index in shortest:
-            was = txt.word_count(parts[("lesson", index)])
+            previous = parts[("lesson", index)]
+            was = txt.word_count(previous)
             log.info("regenerating lesson %d: %d words -> ~%d", index + 1, was, per_lesson)
-            parts[("lesson", index)] = regenerate(("lesson", index), (), per_lesson)
+            candidate = regenerate(("lesson", index), (), per_lesson)
+            # Keep whichever is longer. Replacing unconditionally made the
+            # repair non-monotonic: round 2 of run 27 redrew lessons of
+            # 366-390 words, got shorter ones back, and took the script from
+            # 4412 words down to 4313 - further from the floor than it started.
+            if txt.word_count(candidate) >= was:
+                parts[("lesson", index)] = candidate
+            else:
+                log.info("  kept the %d-word original over a %d-word redraw",
+                         was, txt.word_count(candidate))
         if _total_words(parts) > high:
             trim_to_budget(parts, lesson_count, budget)
 

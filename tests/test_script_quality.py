@@ -52,7 +52,12 @@ def test_trimming():
           "text already inside the limit is untouched")
     # Over-long is trimmed for free, short has to be bought back with rewrites, so the
     # order aims at the full target rather than under it.
-    check(sc.ordered_words(395) == 395, "the word order is not discounted below the target")
+    # The ask is deliberately above the target now: the model returns 82-86%
+    # of whatever per-lesson figure it is given, measured over two whole runs.
+    check(sc.ordered_words(395) > 395,
+          "the word order is not discounted below the target")
+    check(round(395 * 0.86) <= 395 <= round(sc.ordered_words(395) * 0.86) + 20,
+          "asking this much lands the delivered count near the target")
     check(sc.ordered_words(10) == 180, "a tiny target is floored at 180 words")
 
 
