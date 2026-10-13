@@ -1,0 +1,62 @@
+name: daily-retry
+
+# One more attempt at a failed daily run, an hour later.
+#
+# Most failures that stop this channel are not bugs: a Kaggle-style queue that
+# never came free, a 5xx from an API, a runner that lost the network. An hour is
+# long enough for those to pass and short enough that the day is not lost - and
+# a day lost here is a hole on the channel, because every later video keeps its
+# own slot.
+#
+# Exactly one retry. If the second attempt fails too, the cause is real and
+# repeating it only buries the evidence under identical logs.
+
+on:
+  workflow_run:
+    workflows: ["daily"]
+    types: [completed]
+
+permissions:
+  contents: write
+  actions: write
+  issues: write
+
+jobs:
+  retry:
+    # Only a genuine failure, and never a retry of a retry.
+    if: >
+      github.event.workflow_run.conclusion == 'failure' &&
+      github.event.workflow_run.event != 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Wait an hour
+        run: sleep 3600
+
+      - uses: actions/checkout@v5
+
+      - name: Has a daily succeeded in the meantime
+        id: recent
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # A scheduled run may have landed while this one slept. Retrying then
+          # would book a second slot for the same day.
+          ok=$(gh run list --workflow daily --status success --limit 1 \
+                 --json createdAt --jq '.[0].createdAt // empty')
+          started="${{ github.event.workflow_run.created_at }}"
+          echo "last success: ${ok:-none}, failed run started: $started"
+          if [ -n "$ok" ] && [[ "$ok" > "$started" ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "a daily has succeeded since; not retrying"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Retry the daily run
+        if: steps.recent.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run daily
+          echo "::notice::Retried the daily workflow after a failure an hour ago."

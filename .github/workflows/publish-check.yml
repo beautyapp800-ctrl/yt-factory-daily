@@ -37,6 +37,12 @@ jobs:
             --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             | tee -a "$GITHUB_STEP_SUMMARY"
 
+      - name: Is the channel about to run quiet
+        id: depth
+        continue-on-error: true   # exit 3 means "queue too short"; the mail must still go
+        run: |
+          python scripts/check_queue_depth.py --min-days 2             --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"             | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: Record what was confirmed
         if: always()
         run: |
@@ -52,7 +58,7 @@ jobs:
           fi
 
       - name: Mail, but only if something is wrong
-        if: steps.check.outcome == 'failure'
+        if: steps.check.outcome == 'failure' || steps.depth.outcome == 'failure'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
