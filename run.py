@@ -206,6 +206,14 @@ def build_until_buffered(cfg):
         ok = process_video(video_id, cfg)
         if ok:
             made += 1
+            # A finished video that did not deepen the queue means it never
+            # reached YouTube - uploads off, or the upload stage conceded.
+            # Without this the loop would keep building videos nobody has
+            # scheduled until the time budget ran out.
+            if queue_depth_days(cfg) <= depth:
+                return made, (f"video {video_id} finished but the queue is still "
+                              f"{depth} day(s) deep, so it did not reach YouTube; "
+                              f"not building more until that is fixed")
             continue
         if attempts >= MAX_ATTEMPTS:
             log.error("video %s has now failed %d times and will not be retried; the next "
