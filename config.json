@@ -144,5 +144,6 @@
     "min_minutes": 27,
     "max_minutes": 33,
     "attempts": 3
-  }
+  },
+  "buffer_days": 1
 }

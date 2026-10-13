@@ -37,7 +37,7 @@ OUTRO_WORDS = 140
 # words a minute (166.2 pooled, and that is what config.words_per_minute holds), a spread
 # of about +-2.5% that moves a 30 minute video by ~0.7 min either way. It was 15%, which
 # allowed 25.5-34.5 minutes.
-WORD_TOLERANCE = 0.04
+WORD_TOLERANCE = 0.04      # only the budget-centred tests use this now; the gate is word_window()
 # Ordering 340 for a wanted 395 (ratio 0.86) landed video 4 at 3710 words, twelve words
 # above the floor that fails the whole script: with the tighter prompts the model stopped
 # overshooting and delivered 262-383 words per lesson. The two failure modes cost very
@@ -111,6 +111,19 @@ def word_budget(cfg):
     """How many words fill target_duration_min of finished narration, pauses included."""
     per_word, fixed_s = _runtime_model(cfg)
     return round((int(cfg["target_duration_min"]) * 60 - fixed_s) / per_word)
+
+
+def word_window(cfg):
+    """The word counts whose estimated runtime is the publishable window.
+
+    Derived from the duration window (config.length_gate, default 27-33 minutes) through
+    the same runtime model the budget uses, not from the budget +-4%: that tolerance
+    rejected 4313 words, which reads in 27.2 minutes - inside the window.
+    """
+    gate = {"min_minutes": 27, "max_minutes": 33, **(cfg.get("length_gate") or {})}
+    per_word, fixed_s = _runtime_model(cfg)
+    return tuple((float(gate[k]) * 60 - fixed_s) / per_word
+                 for k in ("min_minutes", "max_minutes"))
 
 
 def estimated_runtime_s(total_words, cfg):
@@ -715,7 +728,7 @@ def trim_to_budget(parts, lesson_count, max_total):
 def fix_word_count(parts, outline, budget, cfg, regenerate):
     """Bring the script inside the budget: trim when it is too long, rewrite when short."""
     lesson_count = len(outline["lessons"])
-    low, high = budget * (1 - WORD_TOLERANCE), budget * (1 + WORD_TOLERANCE)
+    low, high = word_window(cfg)
 
     if _total_words(parts) > high:
         log.warning("%d words is over the %d ceiling, trimming to the %d budget",
@@ -872,8 +885,8 @@ def run(video_id, cfg):
         # away guarantees no video at all.
         concede(video_id, "script",
                 f"{total} words against a {budget} budget "
-                f"({budget * (1 - WORD_TOLERANCE):.0f}-"
-                f"{budget * (1 + WORD_TOLERANCE):.0f} wanted)",
+                f"({word_window(cfg)[0]:.0f}-{word_window(cfg)[1]:.0f} reads "
+                f"inside the duration window)",
                 using="the script as written")
 
     full_text = assemble(parts, lesson_count)
