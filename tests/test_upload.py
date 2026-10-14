@@ -186,14 +186,15 @@ def test_a_scheduled_video_goes_up_private_for_the_right_moment(tmp):
     from datetime import datetime, timezone as tz
     summer = up.publish_at(SCHEDULED, datetime(2026, 10, 3, 19, 0, tzinfo=tz.utc))
     winter = up.publish_at(SCHEDULED, datetime(2026, 1, 15, 10, 0, tzinfo=tz.utc))
-    check(summer == "2026-10-06T18:00:00Z", f"three days ahead, 21:00 Kyiv in summer ({summer})")
-    check(winter == "2026-01-18T19:00:00Z",
+    check(summer == "2026-10-04T18:00:00Z",
+          f"22:00 Kyiv is past today's slot, so tomorrow's 21:00 in summer ({summer})")
+    check(winter == "2026-01-15T19:00:00Z",
           f"and in winter, when Kyiv is an hour further from UTC ({winter}) - the same 21:00 "
           f"local either way, which a fixed offset would get wrong for half the year")
 
     late = up.publish_at(SCHEDULED, datetime(2026, 10, 3, 19, 30, tzinfo=tz.utc))
-    check(late == "2026-10-06T18:00:00Z",
-          f"running after 21:00 local still schedules three days out ({late})")
+    check(late == "2026-10-04T18:00:00Z",
+          f"running after 21:00 local takes the next day's slot ({late})")
 
     status = up.build_body(_video(tmp), SCHEDULED,
                            datetime(2026, 10, 3, 19, 0, tzinfo=tz.utc))["status"]
@@ -208,49 +209,65 @@ def test_a_scheduled_video_goes_up_private_for_the_right_moment(tmp):
           "with scheduling off there is no publishAt at all")
 
 
-def test_the_slot_follows_the_queue_not_the_clock(tmp):
-    """Every scheduled run of this repository so far started 2h55 to 5h44 after its cron,
-    so nothing a viewer sees may depend on what time the runner woke up."""
-    print("test_the_slot_follows_the_queue_not_the_clock")
-    from datetime import datetime, timedelta, timezone as tz
-    taken = datetime(2026, 10, 7, 18, 0, tzinfo=tz.utc)        # the slot the queue ends on
+def test_the_slot_is_the_nearest_free_one_at_least_two_hours_away(tmp):
+    """Every scheduled run of this repository starts hours after its cron and a full
+    production run takes hours more, so the slot cannot depend on when the runner woke."""
+    print("test_the_slot_is_the_nearest_free_one_at_least_two_hours_away")
+    from datetime import datetime, timezone as tz
+    utc = tz.utc
+    taken = [datetime(2026, 10, 5, 18, 0, tzinfo=utc), datetime(2026, 10, 6, 18, 0, tzinfo=utc)]
 
-    on_time = up.publish_at(SCHEDULED, datetime(2026, 10, 5, 1, 17, tzinfo=tz.utc), taken)
-    six_hours_late = up.publish_at(SCHEDULED, datetime(2026, 10, 5, 7, 1, tzinfo=tz.utc), taken)
-    check(on_time == six_hours_late == "2026-10-08T18:00:00Z",
-          f"the cron hour and six hours later book the same slot ({on_time})")
+    early = up.publish_at(SCHEDULED, datetime(2026, 10, 5, 1, 17, tzinfo=utc), [])
+    check(early == "2026-10-05T18:00:00Z", f"with nothing taken, today's slot ({early})")
 
-    # A run dragged past local midnight: 5 Oct 23:40 UTC is already 6 Oct in Kyiv.
-    past_midnight = up.publish_at(SCHEDULED, datetime(2026, 10, 5, 23, 40, tzinfo=tz.utc), taken)
-    check(past_midnight == "2026-10-08T18:00:00Z",
-          f"and so does a run that slips over local midnight ({past_midnight}) - under "
-          f"'now + 3 days' that one would have skipped a day and left the channel empty")
+    skip = up.publish_at(SCHEDULED, datetime(2026, 10, 5, 7, 1, tzinfo=utc), taken)
+    check(skip == "2026-10-07T18:00:00Z", f"taken days are skipped, first free is next ({skip})")
 
-    # Two runs in one day (the second cron catching a dropped first one) must not collide.
-    second = up.publish_at(SCHEDULED, datetime(2026, 10, 5, 7, 1, tzinfo=tz.utc),
-                           datetime.fromisoformat(on_time.replace("Z", "+00:00")))
-    check(second == "2026-10-09T18:00:00Z",
-          f"a second run the same day takes the next day's slot, not the same minute ({second})")
+    gap = up.publish_at(SCHEDULED, datetime(2026, 10, 4, 7, 1, tzinfo=utc),
+                        [datetime(2026, 10, 5, 18, 0, tzinfo=utc)])
+    check(gap == "2026-10-04T18:00:00Z",
+          f"a free day before the end of the queue is filled, not skipped ({gap})")
 
-    # A day lost: the queue ends tomorrow, and the buffer is spent rather than a gap left.
-    thin = up.publish_at(SCHEDULED, datetime(2026, 10, 5, 7, 1, tzinfo=tz.utc),
-                         datetime(2026, 10, 6, 18, 0, tzinfo=tz.utc))
-    check(thin == "2026-10-07T18:00:00Z",
-          f"with a thin queue the next video goes out the very next day ({thin})")
+    # 2 Oct 23:40 UTC is already 3 Oct 02:40 in Kyiv: a run dragged past local midnight.
+    midnight = up.publish_at(SCHEDULED, datetime(2026, 10, 2, 23, 40, tzinfo=utc), [])
+    check(midnight == "2026-10-03T18:00:00Z",
+          f"a run that slips over local midnight still gets the very next 21:00 ({midnight})")
 
-    # Queue exhausted: nothing left to follow, so the configured buffer is rebuilt.
-    stale = up.publish_at(SCHEDULED, datetime(2026, 10, 5, 7, 1, tzinfo=tz.utc),
-                          datetime(2026, 9, 20, 18, 0, tzinfo=tz.utc))
-    check(stale == "2026-10-08T18:00:00Z",
-          f"an exhausted queue starts the buffer again, not in the past ({stale})")
+    # The lead is two hours, measured to the slot.
+    close = up.publish_at(SCHEDULED, datetime(2026, 10, 5, 16, 30, tzinfo=utc), [])
+    check(close == "2026-10-06T18:00:00Z", f"90 minutes away is too close ({close})")
+    enough = up.publish_at(SCHEDULED, datetime(2026, 10, 5, 15, 30, tzinfo=utc), [])
+    check(enough == "2026-10-05T18:00:00Z", f"150 minutes away is enough ({enough})")
 
-    # Never within half an hour of now, whatever the queue says.
-    hour = up.publish_at({**SCHEDULED, "publish_time": "10:10"},
-                         datetime(2026, 10, 5, 7, 1, tzinfo=tz.utc),
-                         datetime(2026, 10, 4, 7, 10, tzinfo=tz.utc))
-    when = datetime.fromisoformat(hour.replace("Z", "+00:00"))
-    check(when > datetime(2026, 10, 5, 7, 1, tzinfo=tz.utc) + timedelta(minutes=30),
-          f"a slot is never close enough to now for YouTube to read it as past ({hour})")
+    # Two runs on one day must not collide: the second sees the first's slot as taken.
+    second = up.publish_at(SCHEDULED, datetime(2026, 10, 5, 7, 1, tzinfo=utc), [
+        datetime.fromisoformat(early.replace("Z", "+00:00"))])
+    check(second == "2026-10-06T18:00:00Z", f"the second run takes the next day ({second})")
+
+    # The old single-datetime form still means "this slot is taken".
+    single = up.publish_at(SCHEDULED, datetime(2026, 10, 5, 7, 1, tzinfo=utc),
+                           datetime(2026, 10, 5, 18, 0, tzinfo=utc))
+    check(single == "2026-10-06T18:00:00Z", f"a single taken slot is honoured ({single})")
+
+
+def test_an_upload_the_database_forgot_is_not_repeated(tmp):
+    print("test_an_upload_the_database_forgot_is_not_repeated")
+    import json as _json
+    vid = db.create_video("lost state")
+    marker = config.output_dir(vid) / "uploaded.json"
+    marker.write_text(_json.dumps({"youtube_id": "abc123",
+                                   "publish_at": "2026-10-14T18:00:00Z"}), encoding="utf-8")
+    calls = []
+
+    class Boom:
+        def videos(self):
+            calls.append("videos")
+            raise AssertionError("a second upload was attempted")
+    check(up.run(vid, CFG, service=Boom()), "the stage reports success")
+    row = db.get_video(vid)
+    check(row["youtube_id"] == "abc123", "the id is restored from the marker")
+    check(row["published_at"] == "2026-10-14T18:00:00Z", "and so is the slot")
+    check(not calls, "and nothing was sent to YouTube")
 
 
 def test_the_two_flags_cannot_be_switched_off(tmp):
@@ -589,7 +606,8 @@ if __name__ == "__main__":
         db.init_db()
         test_body_has_what_was_asked_for(tmp)
         test_a_scheduled_video_goes_up_private_for_the_right_moment(tmp)
-        test_the_slot_follows_the_queue_not_the_clock(tmp)
+        test_the_slot_is_the_nearest_free_one_at_least_two_hours_away(tmp)
+        test_an_upload_the_database_forgot_is_not_repeated(tmp)
         test_the_two_flags_cannot_be_switched_off(tmp)
         test_metadata_problems_are_found_before_uploading(tmp)
         test_retries_resume_and_succeed(tmp)

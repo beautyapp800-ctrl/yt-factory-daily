@@ -289,6 +289,22 @@ def last_scheduled_publish():
     return latest
 
 
+def scheduled_publish_times():
+    """Every publishAt already handed to YouTube, as aware datetimes."""
+    times = []
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT published_at FROM videos WHERE published_at IS NOT NULL "
+            "AND published_at != '' AND youtube_id IS NOT NULL AND youtube_id != ''").fetchall()
+    for row in rows:
+        try:
+            when = datetime.fromisoformat(str(row[0]).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            continue
+        times.append(when if when.tzinfo else when.replace(tzinfo=timezone.utc))
+    return times
+
+
 def scheduled_after(moment):
     """Videos whose publishAt is still ahead of `moment`: what the channel has left to show."""
     rows = []

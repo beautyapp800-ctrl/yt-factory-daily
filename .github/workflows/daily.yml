@@ -134,6 +134,7 @@ jobs:
             output/${{ steps.state.outputs.video_id }}/script.txt
             output/${{ steps.state.outputs.video_id }}/outline.json
             output/${{ steps.state.outputs.video_id }}/concept.json
+            output/${{ steps.state.outputs.video_id }}/uploaded.json
           key: video-${{ steps.state.outputs.video_id }}-${{ github.run_id }}
           restore-keys: |
             video-${{ steps.state.outputs.video_id }}-
@@ -154,6 +155,7 @@ jobs:
             output/${{ steps.state.outputs.video_id }}/script.txt
             output/${{ steps.state.outputs.video_id }}/outline.json
             output/${{ steps.state.outputs.video_id }}/concept.json
+            output/${{ steps.state.outputs.video_id }}/uploaded.json
           key: video-${{ steps.state.outputs.video_id }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Build the contact sheet (how the pictures are reviewed at a glance)
@@ -188,20 +190,35 @@ jobs:
             echo "database unchanged"
             exit 0
           fi
-          git commit -m "State after run ${{ github.run_id }} (${{ steps.run.outcome }})"
-          # The database IS the memory: which video exists, which stages finished, what is
-          # scheduled on YouTube. A push lost to a race would make the next run repeat work
-          # that was already paid for, so it is retried rather than left to chance.
+          # The database IS the memory: which video exists, which is on YouTube. Losing
+          # this push made the next run upload the same video a second time. The earlier
+          # version rebased the binary file, hit a conflict, and then pushed a detached
+          # head that had nothing new in it - which git reports as success. So there is
+          # no rebase here: this run's copy of the file is put on top of whatever the
+          # remote has now, and the push is checked by comparing what the remote holds.
+          cp data/factory.db "$RUNNER_TEMP/factory.db"
           for attempt in 1 2 3 4 5; do
-            git pull --rebase --autostash origin "${{ github.ref_name }}" || true
-            if git push origin "HEAD:${{ github.ref_name }}"; then
-              echo "database pushed on attempt $attempt"
+            git fetch origin "${{ github.ref_name }}"
+            git reset --hard "origin/${{ github.ref_name }}"
+            cp "$RUNNER_TEMP/factory.db" data/factory.db
+            git add data/factory.db
+            if git diff --cached --quiet; then
+              echo "the remote already holds this database"
               exit 0
+            fi
+            git commit -m "State after run ${{ github.run_id }} (${{ steps.run.outcome }})"
+            if git push origin "HEAD:${{ github.ref_name }}"; then
+              git fetch origin "${{ github.ref_name }}"
+              if git diff --quiet "origin/${{ github.ref_name }}" -- data/factory.db                  && cmp -s data/factory.db "$RUNNER_TEMP/factory.db"; then
+                echo "database pushed and verified on attempt $attempt"
+                exit 0
+              fi
+              echo "push reported success but the remote copy differs"
             fi
             echo "push attempt $attempt failed, retrying in $((attempt * 10))s"
             sleep $((attempt * 10))
           done
-          echo "::error::the database could not be pushed after 5 attempts; the next run will"               " repeat this video's finished stages"
+          echo "::error::the database could not be pushed after 5 attempts; the next run would repeat finished work, so this run is failed on purpose"
           exit 1
 
       - name: Post the run summary (this is the email)
