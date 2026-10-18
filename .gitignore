@@ -30,6 +30,7 @@ output/
 *.sqlite3
 data/*
 !data/factory.db
+!data/thumb_refresh.json
 
 # Logs
 logs/

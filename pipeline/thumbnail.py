@@ -654,6 +654,34 @@ def _phrase_for(video_id, title, cfg):
     return title_line_options(title), "", note
 
 
+def _bust(video_id, title, video, cfg):
+    """The bust thumbnail (pipeline/bust_thumbnail.py). True when it was made; False sends
+    run() on to the older picture-and-two-lines thumbnail, which needs no new pictures."""
+    from pipeline import bust_thumbnail
+    out = output_dir(video_id)
+    promise = ""
+    if (out / "outline.json").exists():
+        try:
+            promise = json.loads((out / "outline.json").read_text(encoding="utf-8")) \
+                .get("promise") or ""
+        except (ValueError, OSError):
+            promise = ""
+    try:
+        details = bust_thumbnail.make(video_id, title, video.get("topic") or title,
+                                      bust_thumbnail.video_text(video_id), out, cfg,
+                                      promise=promise)
+    except Exception as e:                                           # noqa: BLE001
+        msg = f"the bust thumbnail could not be made ({e}); using the older thumbnail"
+        log.warning(msg)
+        db.log_event(video_id, "thumbnail", "warning", msg)
+        return False
+    line = bust_thumbnail.summary(details)
+    log.info(line)
+    db.log_event(video_id, "thumbnail", "info" if details["passed"] else "warning", line)
+    db.update_video(video_id, thumbnail_path=details["path"])
+    return True
+
+
 def run(video_id, cfg):
     video = db.get_video(video_id) or {}
     title = video.get("seo_title") or video.get("title")
@@ -663,6 +691,13 @@ def run(video_id, cfg):
         concede(video_id, "thumbnail", "the video has no title yet",
                 using=f"the topic instead: {title}")
 
+    style = ((cfg or {}).get("thumbnail") or {}).get("style")
+    if style == "bust":
+        if _bust(video_id, title, video, cfg):
+            return True
+        # The bust spent whatever Neurons there were; the fallback does not draw covers.
+        cfg = {**cfg, "thumbnail": {**cfg["thumbnail"], "covers": False}}
+
     accent_name, accent = accent_for(video_id)
     options, phrase, fallback_note = _phrase_for(video_id, title, cfg)
 
@@ -671,7 +706,8 @@ def run(video_id, cfg):
     # 210x118 feed rather than for someone already watching.
     rows = db.get_video_images(video_id)
     narration = [(r["path"], r["provider"]) for r in rows if r["path"]]
-    covers = cover_image.draw(video_id, video.get("topic") or title, cfg)
+    covers = (cover_image.draw(video_id, video.get("topic") or title, cfg)
+              if ((cfg or {}).get("thumbnail") or {}).get("covers", True) else [])
     candidates = covers + narration
     if not covers:
         log.warning("no cover could be drawn; falling back to the narration frames, which are "

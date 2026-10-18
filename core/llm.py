@@ -380,3 +380,57 @@ def complete_json(prompt, system=None, max_tokens=4096, temperature=0.7):
                   "No prose, no markdown, no code fences.")
         text = complete(strict, system, max_tokens, temperature=0.2, json_mode=True)
         return extract_json(text)
+
+
+# --- vision ------------------------------------------------------------------
+
+def vision_json(prompt, images, model=None, max_tokens=2048):
+    """Ask Gemini about a set of pictures and return its parsed JSON answer.
+
+    `images` is a list of JPEG bytes, sent in order as inline data after the prompt. Gemini
+    only - Groq's model here does not see pictures. `model` defaults to the configured text
+    model; callers that judge pictures pass their own, because the free tier counts requests
+    per model per day and the script stage already spends most of the text model's.
+    Raises LLMError on any failure; the caller decides what judging without a judge means.
+    """
+    import base64
+
+    key = get_key("GEMINI_API_KEY")
+    if not key:
+        raise LLMError("GEMINI_API_KEY is not set")
+    parts = [{"text": prompt}]
+    for data in images:
+        parts.append({"inline_data": {"mime_type": "image/jpeg",
+                                      "data": base64.b64encode(data).decode("ascii")}})
+    payload = {"contents": [{"role": "user", "parts": parts}],
+               "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0.2,
+                                    "responseMimeType": "application/json"}}
+    model = model or _settings()["gemini_model"]
+    url = GEMINI_URL.format(model=model)
+
+    waited = 0.0
+    for attempt in range(_MAX_429_WAITS):
+        _rate_limit()
+        status, body = _post(url, payload, {"x-goog-api-key": key})
+        if status == 429:
+            if _is_daily_quota(body):
+                raise LLMError(f"gemini {model} daily quota is used up: {body[:200]}")
+            wait = _retry_after_seconds(body, attempt)
+            waited += wait
+            if waited > _MAX_WAIT_PER_CALL_S:
+                raise LLMError(f"gemini {model} rate-limited {waited:.0f}s on one call")
+            time.sleep(wait)
+            continue
+        if status != 200:
+            raise LLMError(f"gemini {model} HTTP {status}: {body[:300]}")
+        data = json.loads(body)
+        candidates = data.get("candidates") or []
+        if not candidates:
+            raise LLMError(f"gemini {model} returned no candidates: {body[:300]}")
+        text = "".join(p.get("text", "")
+                       for p in (candidates[0].get("content", {}).get("parts") or []))
+        try:
+            return extract_json(text)
+        except ValueError as e:
+            raise LLMError(f"gemini {model} vision answer was not JSON: {e}") from e
+    raise LLMError(f"gemini {model} still rate-limited after {_MAX_429_WAITS} waits")
