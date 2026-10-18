@@ -8,6 +8,24 @@
       "attribution": "– STOIC WISDOM",
       "passed": true,
       "neurons": 979
+    },
+    "23": {
+      "at": "2026-10-18T18:10:31+00:00",
+      "youtube_id": "NgCKSFiWl1c",
+      "kind": "old",
+      "headline": "LET IT GO",
+      "attribution": "– STOIC WISDOM",
+      "passed": true,
+      "neurons": 0
+    },
+    "22": {
+      "at": "2026-10-18T18:11:00+00:00",
+      "youtube_id": "wBL4uvDaV_M",
+      "kind": "old",
+      "headline": "APPRECIATE NOW",
+      "attribution": "– STOIC WISDOM",
+      "passed": true,
+      "neurons": 0
     }
   },
   "spend": [
@@ -22,6 +40,16 @@
       "at": "2026-10-18T18:08:29+00:00",
       "video_id": 24,
       "kind": "scheduled"
+    },
+    {
+      "at": "2026-10-18T18:10:31+00:00",
+      "video_id": 23,
+      "kind": "old"
+    },
+    {
+      "at": "2026-10-18T18:11:00+00:00",
+      "video_id": 22,
+      "kind": "old"
     }
   ]
 }
