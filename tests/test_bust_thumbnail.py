@@ -117,7 +117,7 @@ def test_a_bust_thumbnail_is_made_checked_and_costed(tmp):
     calls = _stub()
     try:
         d = bust.make(5, "10 Stoic Lessons on Discipline", "discipline",
-                      "Marcus Aurelius. " * 8, tmp / "a", CFG, budget=1200)
+                      "Marcus Aurelius. " * 8, tmp / "a", CFG, budget=1400)
     finally:
         _restore()
     check(Path(d["path"]).exists() and Image.open(d["path"]).size == (1280, 720),
@@ -138,41 +138,26 @@ def test_a_bust_thumbnail_is_made_checked_and_costed(tmp):
 def test_a_small_budget_buys_fewer_candidates(tmp):
     calls = _stub()
     try:
-        d = bust.make(6, "t", "t", "", tmp / "b", CFG, budget=200)
+        d = bust.make(6, "t", "t", "", tmp / "b", CFG, budget=400)
     finally:
         _restore()
-    check(len(calls) == 1, f"200 Neurons buy one 192-guess candidate ({len(calls)})")
-    check(d["neurons"] <= 200, "and the budget is not exceeded")
+    check(bust.neurons_per_image(8) == 326.4 and bust.neurons_per_image(2) == 96,
+          "the cost per image follows the measured 19 + 38 a step")
+    check(len(calls) == 1, f"400 Neurons buy one 8-step candidate ({len(calls)})")
+    check(d["neurons"] <= 400, "and the budget is not exceeded")
 
 
-def test_no_budget_uses_pollinations_and_nothing_at_all_raises(tmp):
-    _stub()
-    seen = []
-
-    def poll(prompt, path, seed, cfg):
-        seen.append(cfg["images"]["pollinations"]["width"])
-        fake_bust(path)
-        return path
-
-    bust.image_api.synthesize_pollinations = poll
+def test_no_budget_means_no_bust_and_no_pollinations(tmp):
+    calls = _stub()
     try:
-        d = bust.make(7, "t", "t", "", tmp / "c", CFG, budget=0)
-        check(d["neurons"] == 0 and d["chosen"]["provider"] == "pollinations",
-              "with no Neurons left the bust comes from pollinations")
-
-        def down(*a, **k):
-            raise image_api.ImageError("402")
-
-        bust.image_api.synthesize_pollinations = down
-        try:
-            bust.make(8, "t", "t", "", tmp / "d", CFG, budget=0)
-            raised = False
-        except RuntimeError:
-            raised = True
-        check(raised, "with no picture at all make() raises, so the caller falls back")
+        bust.make(7, "t", "t", "", tmp / "c", CFG, budget=100)
+        raised = False
+    except RuntimeError:
+        raised = True
     finally:
-        bust.image_api.synthesize_pollinations = _forbidden
         _restore()
+    check(raised and not calls, "with too few Neurons nothing is drawn and make() raises, so "
+                                "the caller falls back (pollinations is never asked)")
 
 
 def test_a_failed_check_is_drawn_again_then_the_best_is_kept(tmp):
@@ -309,7 +294,7 @@ if __name__ == "__main__":
         test_the_headline_rules()
         test_a_bust_thumbnail_is_made_checked_and_costed(tmp)
         test_a_small_budget_buys_fewer_candidates(tmp)
-        test_no_budget_uses_pollinations_and_nothing_at_all_raises(tmp)
+        test_no_budget_means_no_bust_and_no_pollinations(tmp)
         test_a_failed_check_is_drawn_again_then_the_best_is_kept(tmp)
         test_gemini_rejections_and_gemini_absence(tmp)
         test_eight_steps_refused_falls_back_to_four(tmp)

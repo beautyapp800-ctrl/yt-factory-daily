@@ -152,9 +152,7 @@
     "attempts": 3,
     "steps": 8,
     "fallback_steps": 4,
-    "neurons_per_image_guess": 192,
     "reserve_neurons": 300,
-    "vision_model": "gemini-flash-latest",
-    "pollinations_candidates": 2
+    "vision_model": "gemini-flash-latest"
   }
 }

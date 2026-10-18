@@ -26,8 +26,13 @@ little and a missing video costs the day.
 
 Neurons. The narration frames come first: this runs after them and spends only what
 core.neurons says the UTC day has left over, keeping its reserve. Less room means fewer
-candidates; no room at all means pollinations, which costs no Neurons; and if that fails too
-the caller falls back to the older thumbnail.
+candidates; no room at all means no bust today and the caller falls back to the older
+thumbnail. Pollinations is not used: it stamps its logo on the picture and does not draw
+marble - both were caught on the first live run.
+
+Measured live on 18 October: flux-1-schnell costs about 19 + 38 Neurons a step, so 326 an
+image at 8 steps against 96 at the frames' 2. After a day's frames there is room for about
+three candidates, which is why the count is set by the budget rather than fixed.
 """
 import io
 import json
@@ -57,10 +62,8 @@ DEFAULTS = {
     "attempts": 3,
     "steps": 8,
     "fallback_steps": 4,             # if the model refuses 8
-    "neurons_per_image_guess": 192,  # until a real figure comes back from the first call
     "reserve_neurons": neurons.DEFAULT_RESERVE,
     "vision_model": "gemini-flash-latest",
-    "pollinations_candidates": 2,
 }
 
 # --- who ---------------------------------------------------------------------
@@ -215,7 +218,7 @@ def bust_prompt(key):
 
 
 class _Drawer:
-    """Draws bust candidates within a Neuron budget, Cloudflare first, pollinations after."""
+    """Draws bust candidates from Cloudflare within a Neuron budget."""
 
     def __init__(self, cfg, settings, budget, out_dir):
         self.cfg, self.s, self.budget, self.out = cfg, settings, budget, Path(out_dir)
@@ -227,7 +230,7 @@ class _Drawer:
         self.counter = 0
 
     def per_image_estimate(self):
-        return self.per_image or self.s["neurons_per_image_guess"]
+        return self.per_image or neurons_per_image(self.steps)
 
     def affordable(self):
         return int((self.budget - self.spent) // self.per_image_estimate())
@@ -262,17 +265,6 @@ class _Drawer:
             return True
         return False
 
-    def _pollinations(self, prompt, path):
-        cfg = json.loads(json.dumps(self.cfg))
-        cfg.setdefault("images", {}).setdefault("pollinations", {}).update(
-            {"width": 1024, "height": 1024})
-        try:
-            image_api.synthesize_pollinations(prompt, path, 0, cfg)
-            return True
-        except image_api.ImageError as e:
-            log.warning("pollinations bust failed: %s", str(e)[:200])
-            return False
-
     def draw(self, prompt, wanted):
         """[(path, provider)], as many as the budget allows up to `wanted`."""
         made = []
@@ -288,12 +280,6 @@ class _Drawer:
             self.counter += 1
             if self._cloudflare(prompt, path):
                 made.append((str(path), "cloudflare"))
-        if not made:
-            for _ in range(self.s["pollinations_candidates"]):
-                path = self.out / f"bust_{self.counter:02d}.jpg"
-                self.counter += 1
-                if self._pollinations(prompt, path):
-                    made.append((str(path), "pollinations"))
         return made
 
 
@@ -337,20 +323,30 @@ def _detail(path):
     return float(np.abs(lap).mean())
 
 
-def rank_candidates(paths, key, model):
+def neurons_per_image(steps):
+    """flux-1-schnell's cost for one 1024x1024 image, as measured: 96 at 2 steps, 326 at 8."""
+    return 19.2 + 38.4 * steps
+
+
+def rank_candidates(paths, key, models):
     """[(path, score, acceptable, notes)] best first. Gemini judges; measurements if not."""
     who = (PHILOSOPHERS[key]["label"].title() if key else "an ancient Stoic philosopher")
     verdicts = {}
     judged_by = "gemini"
-    try:
-        answer = vision_json(VISION_PROMPT.format(n=len(paths), who=who),
-                             [_jpeg_bytes(p) for p in paths], model=model)
-        for item in (answer or {}).get("images", []):
-            i = int(item.get("index", -1))
-            if 0 <= i < len(paths):
-                verdicts[i] = item
-    except (LLMError, ValueError, TypeError) as e:
-        log.warning("Gemini could not judge the busts (%s); ranking by measurement", e)
+    pictures = [_jpeg_bytes(p) for p in paths]
+    for model in [m for i, m in enumerate(models) if m and m not in models[:i]]:
+        try:
+            answer = vision_json(VISION_PROMPT.format(n=len(paths), who=who), pictures,
+                                 model=model)
+            for item in (answer or {}).get("images", []):
+                i = int(item.get("index", -1))
+                if 0 <= i < len(paths):
+                    verdicts[i] = item
+            break
+        except (LLMError, ValueError, TypeError) as e:
+            log.warning("Gemini %s could not judge the busts (%s)", model, str(e)[:160])
+    if not verdicts:
+        log.warning("no Gemini model judged the busts; ranking by measurement")
         judged_by = "measurement"
 
     ranked = []
@@ -664,7 +660,9 @@ def make(video_id, title, topic, text, out_dir, cfg, promise="", budget=None):
         if not drawn:
             log.warning("attempt %d: no bust could be drawn", attempt)
             break
-        ranked, judged_by = rank_candidates([p for p, _ in drawn], key, s["vision_model"])
+        ranked, judged_by = rank_candidates(
+            [p for p, _ in drawn], key,
+            [s["vision_model"], ((cfg or {}).get("llm") or {}).get("gemini_model")])
         provider = dict(drawn)
         for rank, (path, score, acceptable, notes) in enumerate(ranked):
             if not acceptable and rank > 0:
@@ -685,7 +683,7 @@ def make(video_id, title, topic, text, out_dir, cfg, promise="", budget=None):
                     "; ".join(tries[-1]["problems"]) or tries[-1]["vision"])
 
     if best is None:
-        raise RuntimeError("no bust could be drawn (Cloudflare and pollinations both failed)")
+        raise RuntimeError("no bust could be drawn: no Neurons left today, or Cloudflare failed")
 
     _, final, chosen = best
     path = out_dir / "thumbnail.jpg"

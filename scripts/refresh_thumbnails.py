@@ -3,6 +3,7 @@
     python scripts/refresh_thumbnails.py               # what the workflow runs
     python scripts/refresh_thumbnails.py --dry-run     # build, do not send to YouTube
     python scripts/refresh_thumbnails.py --only 24     # one video
+    python scripts/refresh_thumbnails.py --restore 22=path/to/thumbnail.jpg   # put one back
 
 Order: every video still waiting for its publish time first, all of them, because those are
 the ones about to be seen; then videos already public, newest first, at most --old-per-day
@@ -13,6 +14,11 @@ Budgets. Neurons: whatever core.neurons says the UTC day has left, after the res
 workflow only runs once a daily run has succeeded, so the narration frames have had theirs.
 YouTube: thumbnails.set is about 50 of 10,000 units; a quota error stops the run and the rest
 waits for tomorrow.
+
+Only a bust Gemini has looked at is sent. The pipeline may use one picked by measurement,
+because a new video must not wait; a video that already has a thumbnail can. That rule
+exists because the first run, with Gemini answering 503, sent two pictures with another
+service's logo on them.
 
 State is data/thumb_refresh.json, not the database, so this job never races the daily run
 over data/factory.db. It records what was done, what was spent (core.neurons reads it), and
@@ -76,14 +82,35 @@ def save(ledger, path=neurons.LEDGER_PATH):
     path.write_text(json.dumps(ledger, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
+def restore(pairs):
+    from core.youtube import build_service, load_credentials
+    from pipeline.upload import set_thumbnail
+    service = build_service(load_credentials())
+    ledger = neurons.load_ledger()
+    for pair in pairs:
+        vid, path = pair.split("=", 1)
+        video = db.get_video(int(vid))
+        set_thumbnail(service, video["youtube_id"], path)
+        ledger["done"].pop(str(vid), None)
+        ledger["set_log"] = [e for e in ledger["set_log"] if str(e.get("video_id")) != str(vid)]
+        save(ledger)
+        print(f"- {vid}: thumbnail restored from {path}")
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--only", type=int)
     parser.add_argument("--old-per-day", type=int, default=2)
+    parser.add_argument("--restore", action="append", default=[],
+                        help="VIDEO_ID=PATH: set this file as the video's thumbnail and "
+                             "forget that it was refreshed, so it is done again later")
     args = parser.parse_args()
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
+    if args.restore:
+        return restore(args.restore)
 
     cfg = load_config()
     ledger = neurons.load_ledger()
@@ -123,6 +150,10 @@ def main():
         copy = SAMPLES / f"{len(report) + 1:02d}_video{vid}_{row['youtube_id']}.jpg"
         shutil.copyfile(details["path"], copy)
         line = bust_thumbnail.summary(details)
+        if details["chosen"]["judged_by"] != "gemini":
+            report.append(f"- {vid}: built but not sent, Gemini did not look at it ({line})")
+            save(ledger)
+            break
         if args.dry_run:
             report.append(f"- {vid} ({kind}, dry run): {line}")
             save(ledger)
