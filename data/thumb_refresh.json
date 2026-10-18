@@ -1,0 +1,27 @@
+{
+  "done": {
+    "24": {
+      "at": "2026-10-18T18:08:29+00:00",
+      "youtube_id": "1-0xXl31AYU",
+      "kind": "scheduled",
+      "headline": "ARMOR UP",
+      "attribution": "– STOIC WISDOM",
+      "passed": true,
+      "neurons": 979
+    }
+  },
+  "spend": [
+    {
+      "at": "2026-10-18T18:08:29+00:00",
+      "video_id": 24,
+      "neurons": 979
+    }
+  ],
+  "set_log": [
+    {
+      "at": "2026-10-18T18:08:29+00:00",
+      "video_id": 24,
+      "kind": "scheduled"
+    }
+  ]
+}
