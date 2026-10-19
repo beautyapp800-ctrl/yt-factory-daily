@@ -5,6 +5,9 @@ The look, fixed by the owner and followed exactly:
 - left, about 45% of the width: a close-up marble bust of a Stoic philosopher - classical
   Greco-Roman sculpture, dramatic side light, real marble texture, the gaze a little aside;
 - behind it a dark grey ground with a little smoke or mist, never pure black;
+- the bottom-right corner, 25% of the width by 20% of the height, is left empty: YouTube
+  draws the duration stamp there and it covered the yellow line once. The type is moved up
+  until it clears the corner, and the check below measures that on the drawn pixels;
 - right: two or three words, large, bold, white - what the video is about, e.g. SELF
   DISCIPLINE - and under them in yellow "- MARCUS AURELIUS", "- SENECA" or "- EPICTETUS".
   The words are drawn by code with a light shadow, never by the image model.
@@ -63,6 +66,7 @@ DEFAULTS = {
     "steps": 8,
     "fallback_steps": 4,             # if the model refuses 8
     "reserve_neurons": neurons.DEFAULT_RESERVE,
+    "frames_reserve_neurons": 9250,  # held back for the day's narration frames (seen: 8256-9216)
     "vision_model": "gemini-flash-latest",
 }
 
@@ -469,8 +473,44 @@ def line_options(words):
     return options
 
 
+# Where YouTube's duration stamp sits: nothing of ours may touch it.
+CORNER_W, CORNER_H = 0.25, 0.20
+CORNER = (round(WIDTH * (1 - CORNER_W)), round(HEIGHT * (1 - CORNER_H)), WIDTH, HEIGHT)
+CORNER_PAD = 10                  # clear air above and left of it, for the shadow
+
+
+def _intersects(a, b):
+    return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
+
+
+def _inks(layout, top):
+    """[(name, (x0, y0, x1, y1))] of each line of type with its block's top edge at `top`."""
+    out, y = [], top
+    for box in layout["boxes"]:
+        out.append(("head", (layout["left"], y, layout["left"] + box[2] - box[0],
+                             y + box[3] - box[1])))
+        y += (box[3] - box[1]) + layout["gap"]
+    y += round(layout["size"] * 0.22) - layout["gap"]
+    abox = layout["abox"]
+    out.append(("attrib", (layout["left"], y, layout["left"] + abox[2] - abox[0],
+                           y + abox[3] - abox[1])))
+    return out
+
+
+def place(layout):
+    """The top edge for this block: as near the middle as it can be while every line stays
+    out of the corner. None if no position does."""
+    keep_out = (CORNER[0] - CORNER_PAD, CORNER[1] - CORNER_PAD, WIDTH, HEIGHT)
+    preferred = round((HEIGHT - layout["total"]) / 2 - HEIGHT * 0.02)
+    for top in range(preferred, MARGIN - 1, -2):
+        if not any(_intersects(ink, keep_out) for _, ink in _inks(layout, top)):
+            return top
+    return None
+
+
 def layout_text(headline, attrib):
-    """The largest arrangement of the headline that fits the right-hand column."""
+    """The largest arrangement of the headline that fits the right-hand column and clears
+    the bottom-right corner."""
     words = headline.split()
     left, right = round(WIDTH * TEXT_LEFT), WIDTH - MARGIN
     column = right - left
@@ -494,6 +534,9 @@ def layout_text(headline, attrib):
             candidate = {"lines": lines, "size": size, "small": small, "gap": gap,
                          "head_h": head_h, "total": total, "boxes": boxes, "abox": abox,
                          "left": left}
+            candidate["top"] = place(candidate)
+            if candidate["top"] is None:
+                continue                      # too big to keep out of the corner: try smaller
             # Bigger type wins; at the same size, fewer lines.
             if best is None or (size, -len(lines)) > (best["size"], -len(best["lines"])):
                 best = candidate
@@ -505,7 +548,7 @@ def layout_text(headline, attrib):
 
 def draw_text(img, layout, attrib):
     """Draw the type with a soft shadow. Returns (image, {name: mask}, [ink boxes])."""
-    top = round((HEIGHT - layout["total"]) / 2 - HEIGHT * 0.02)
+    top = layout["top"]
     items, y = [], top
     for line, box in zip(layout["lines"], layout["boxes"]):
         items.append(("head", line, layout["size"], WHITE, (layout["left"] - box[0], y - box[1])))
@@ -582,6 +625,16 @@ def check(backdrop, final, masks, inks, layout, subject):
     for box in inks:
         if box[0] < 16 or box[1] < 16 or box[2] > WIDTH - 16 or box[3] > HEIGHT - 16:
             problems.append(f"type is cut off at {box}")
+
+    corner = np.zeros((HEIGHT, WIDTH), dtype=bool)
+    corner[CORNER[1]:, CORNER[0]:] = True
+    drawn = (np.asarray(masks["head"]) > 20) | (np.asarray(masks["attrib"]) > 20)
+    if (drawn & corner).any():
+        problems.append("type reaches the bottom-right corner, where YouTube puts the duration")
+    for _, ink in _inks(layout, layout["top"]):
+        if _intersects(ink, (CORNER[0] - CORNER_PAD, CORNER[1] - CORNER_PAD, WIDTH, HEIGHT)):
+            problems.append("type is within a few pixels of the bottom-right corner")
+            break
 
     scale = CHECK_SIZE[1] / HEIGHT
     head_cap = (_font(layout["size"]).getbbox("H")[3] - _font(layout["size"]).getbbox("H")[1]) \

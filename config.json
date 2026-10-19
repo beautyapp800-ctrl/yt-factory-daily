@@ -153,6 +153,7 @@
     "steps": 8,
     "fallback_steps": 4,
     "reserve_neurons": 300,
-    "vision_model": "gemini-flash-latest"
+    "vision_model": "gemini-flash-latest",
+    "frames_reserve_neurons": 9250
   }
 }

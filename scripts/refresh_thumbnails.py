@@ -5,10 +5,15 @@
     python scripts/refresh_thumbnails.py --only 24     # one video
     python scripts/refresh_thumbnails.py --restore 22=path/to/thumbnail.jpg   # put one back
 
-Order: every video still waiting for its publish time first, all of them, because those are
-the ones about to be seen; then videos already public, newest first, at most --old-per-day
-(2) a UTC day. A video whose thumbnail the pipeline already made in the bust style is left
-alone, and so is one this script has done before.
+Order, and it is the Neuron priority too: the narration frames of the next video come first
+(a reserve is held back for them until they are drawn), then the cover of a video that has no
+bust yet - the daily run could not afford one - earliest publish time first, then a redo of a
+bust made to an older layout, then videos already public, at most --old-per-day (2) a day. A
+video whose thumbnail the pipeline already made in the bust style is left alone, and so is
+one this script has done at the current layout.
+
+When the daily run could not draw a bust, this is what puts it right: a cron entry runs it
+just after the allowance resets (see core/neurons.py), well before the video's publish time.
 
 Budgets. Neurons: whatever core.neurons says the UTC day has left, after the reserve - the
 workflow only runs once a daily run has succeeded, so the narration frames have had theirs.
@@ -41,6 +46,9 @@ from pipeline import bust_thumbnail
 log = get_logger("refresh")
 
 SAMPLES = OUTPUT_DIR / "_refresh"
+# Bumped when the look changes so that thumbnails made to an older one are done again. 2: the
+# bottom-right corner is kept clear of YouTube's duration stamp.
+LAYOUT = 2
 
 
 def _when(value):
@@ -59,22 +67,35 @@ def made_by_pipeline(video_id):
 
 
 def plan(ledger, now, old_per_day, only=None):
-    """(scheduled, old) lists of video rows still to do, in the order they should be done."""
+    """(urgent, old): video rows to do now, in the order they should be done.
+
+    urgent = no bust at all yet, then bust at an older layout, each by publish time; both are
+    still waiting for their publish time or at least recent. old = public ones, newest first.
+    """
     with db._connect() as conn:
         rows = [dict(r) for r in conn.execute(
             "SELECT * FROM videos WHERE youtube_id IS NOT NULL AND youtube_id != '' "
             "ORDER BY id DESC")]
-    done = set(ledger["done"])
-    todo = [r for r in rows if str(r["id"]) not in done and not made_by_pipeline(r["id"])]
+    done = ledger["done"]
+    todo = []
+    for r in rows:
+        entry = done.get(str(r["id"]))
+        if entry is not None and entry.get("layout", 1) >= LAYOUT:
+            continue
+        if entry is None and made_by_pipeline(r["id"]):
+            continue
+        r["_redo"] = entry is not None
+        todo.append(r)
     if only is not None:
         todo = [r for r in todo if r["id"] == only]
     scheduled = [r for r in todo if (_when(r["published_at"]) or now) > now]
     old = [r for r in todo if r not in scheduled]
-    today = now.date().isoformat()
+    today = neurons.window_start(now)
     old_today = sum(1 for e in ledger["set_log"]
-                    if e.get("kind") == "old" and str(e.get("at", ""))[:10] == today)
+                    if e.get("kind") == "old" and (_when(e.get("at")) or now) >= today)
     room = max(0, old_per_day - old_today) if only is None else len(old)
-    return sorted(scheduled, key=lambda r: _when(r["published_at"])), old[:room]
+    urgent = sorted(scheduled, key=lambda r: (r["_redo"], _when(r["published_at"])))
+    return urgent, old[:room]
 
 
 def save(ledger, path=neurons.LEDGER_PATH):
@@ -129,11 +150,20 @@ def main():
     from pipeline.upload import UploadError, set_thumbnail
 
     SAMPLES.mkdir(parents=True, exist_ok=True)
-    reserve = bust_thumbnail.settings(cfg)["reserve_neurons"]
+    conf = bust_thumbnail.settings(cfg)
     report = []
-    for kind, row in [("scheduled", r) for r in scheduled] + [("old", r) for r in old]:
+    queue = [("scheduled", r) for r in scheduled] + [("old", r) for r in old]
+    for n, (kind, row) in enumerate(queue):
         vid = row["id"]
-        budget = neurons.available(reserve)
+        free = neurons.available(conf["reserve_neurons"],
+                                 frames_reserve=conf["frames_reserve_neurons"])
+        # Each video gets an equal share of what there is, but at least one candidate if one
+        # fits: one picture each beats three for the first and none for the rest.
+        one = bust_thumbnail.neurons_per_image(conf["steps"])
+        left = len(queue) - n
+        budget = max(free / left, one) if free >= one else free
+        budget = min(budget, free)
+        log.info("video %s: %.0f Neurons free now, %.0f for this one", vid, free, budget)
         title = row.get("seo_title") or row.get("title") or row["topic"]
         try:
             details = bust_thumbnail.make(vid, title, row["topic"],
@@ -150,10 +180,12 @@ def main():
         copy = SAMPLES / f"{len(report) + 1:02d}_video{vid}_{row['youtube_id']}.jpg"
         shutil.copyfile(details["path"], copy)
         line = bust_thumbnail.summary(details)
-        if details["chosen"]["judged_by"] != "gemini":
-            report.append(f"- {vid}: built but not sent, Gemini did not look at it ({line})")
+        if details["chosen"]["judged_by"] != "gemini" or not details["passed"]:
+            # A thumbnail already on YouTube is replaced only by one that is both judged by
+            # Gemini and passes every check; otherwise it waits for the next window.
+            report.append(f"- {vid}: built but NOT sent ({'not judged by Gemini' if details['chosen']['judged_by'] != 'gemini' else 'failed: ' + '; '.join(details['chosen']['problems'] or [details['chosen']['vision']])}): {line}")
             save(ledger)
-            break
+            continue
         if args.dry_run:
             report.append(f"- {vid} ({kind}, dry run): {line}")
             save(ledger)
@@ -168,7 +200,8 @@ def main():
                 break
             continue
         ledger["done"][str(vid)] = {"at": stamp, "youtube_id": row["youtube_id"],
-                                    "kind": kind, "headline": details["headline"],
+                                    "kind": kind, "layout": LAYOUT,
+                                    "headline": details["headline"],
                                     "attribution": details["attribution"],
                                     "passed": details["passed"],
                                     "neurons": details["neurons"]}

@@ -7,7 +7,17 @@ name: thumbnail-refresh
 # first; a failed daily run is retried an hour later and needs what is left. It writes only
 # data/thumb_refresh.json, never data/factory.db, so it cannot race the daily run's database.
 
+# Two triggers besides a daily run finishing. When the daily run could not afford a bust the
+# video is left with the older thumbnail and this puts it right once the allowance has reset
+# (07:00 UTC in summer, 08:00 after the clocks go back - see core/neurons.py), which is hours
+# before the video is due. Both times are listed because only one of them is after the reset
+# at any time of year; the other finds nothing left to do. A scheduled run that GitHub starts
+# late is harmless: the Neuron budget is worked out when it starts, with the narration frames
+# of the coming run held back until they are drawn.
 on:
+  schedule:
+    - cron: "10 7 * * *"
+    - cron: "10 8 * * *"
   workflow_run:
     workflows: ["daily"]
     types: [completed]
@@ -36,7 +46,7 @@ permissions:
 
 jobs:
   refresh:
-    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:

@@ -7,7 +7,7 @@ the suite spends no Neurons and no Gemini requests.
 import json
 import sys
 import tempfile
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -23,6 +23,12 @@ import core.images as image_api
 import pipeline.bust_thumbnail as bust
 import pipeline.phrase as phrase
 import pipeline.thumbnail as thumb
+import importlib.util
+_spec = importlib.util.spec_from_file_location(
+    'scripts_refresh', Path(__file__).resolve().parent.parent / 'scripts' / 'refresh_thumbnails.py')
+scripts_refresh = importlib.util.module_from_spec(_spec)
+sys.modules['scripts_refresh'] = scripts_refresh
+_spec.loader.exec_module(scripts_refresh)
 
 
 def _forbidden(*a, **k):
@@ -215,22 +221,85 @@ def test_eight_steps_refused_falls_back_to_four(tmp):
           "a refused step count is lowered once, not given up on")
 
 
-def test_neurons_counts_the_utc_day(tmp):
+def test_neurons_count_the_pacific_day_and_hold_frames_back(tmp):
+    from zoneinfo import ZoneInfo
+    summer = datetime(2026, 10, 19, 14, 0, tzinfo=timezone.utc)
+    check(neurons.window_start(summer) == datetime(2026, 10, 19, 7, 0, tzinfo=timezone.utc),
+          "the window turns over at 07:00 UTC in summer")
+    winter = datetime(2026, 11, 20, 14, 0, tzinfo=timezone.utc)
+    check(neurons.window_start(winter) == datetime(2026, 11, 20, 8, 0, tzinfo=timezone.utc),
+          "and at 08:00 UTC once the clocks have gone back")
+    check(neurons.window_start(datetime(2026, 10, 19, 6, 44, tzinfo=timezone.utc))
+          == datetime(2026, 10, 18, 7, 0, tzinfo=timezone.utc),
+          "06:44 UTC still belongs to the window that began the day before")
+
     db.DB_PATH = tmp / "n.db"
     db.init_db()
     vid = db.create_video("t")
-    db.log_event(vid, "images", "info", "63 made ... 8448 neurons over 88 Cloudflare calls")
-    db.log_event(vid, "thumbnail", "info", "bust: X / Y, 384 neurons over 4 Cloudflare calls")
-    db.log_event(vid, "script", "info", "Cloudflare's 10,000 Neurons a day")
     ledger = tmp / "ledger.json"
-    old = (datetime.now(timezone.utc) - timedelta(days=1, hours=1)).isoformat()
-    ledger.write_text(json.dumps({"spend": [{"at": old, "neurons": 999},
-                                            {"at": datetime.now(timezone.utc).isoformat(),
-                                             "neurons": 100}]}), encoding="utf-8")
-    spent = neurons.spent_today(ledger_path=ledger)
-    check(spent == 8448 + 384 + 100, f"today's images, thumbnail and ledger are counted ({spent})")
-    check(neurons.available(300, ledger_path=ledger) == 10000 - 300 - spent,
-          "available keeps the reserve")
+    ledger.write_text(json.dumps({"spend": [
+        {"at": "2026-10-18T18:08:00+00:00", "neurons": 979}]}), encoding="utf-8")
+    import sqlite3
+    from contextlib import closing
+    with closing(sqlite3.connect(db.DB_PATH)) as conn:
+        conn.execute("INSERT INTO events (video_id, stage, level, message, created_at) VALUES "
+                     "(?, 'images', 'info', ?, ?)",
+                     (vid, "64 made, 32 redrawn for lettering, 9216 neurons over 96 Cloudflare "
+                           "calls", "2026-10-19T06:23:38+00:00"))
+        conn.commit()
+    at_0644 = datetime(2026, 10, 19, 6, 44, tzinfo=timezone.utc)
+    spent = neurons.spent_today(at_0644, ledger)
+    check(spent == 9216 + 979,
+          f"the evening's 979 and the morning's frames are one window, as Cloudflare said ({spent})")
+    check(neurons.available(300, at_0644, ledger) == 0, "so nothing is free for the cover then")
+    after = datetime(2026, 10, 19, 14, 0, tzinfo=timezone.utc)
+    check(neurons.spent_today(after, ledger) == 0 and not neurons.frames_done(after),
+          "after 07:00 the window is empty and the next frames are still to come")
+    check(neurons.available(0, after, ledger, frames_reserve=9250) == 750,
+          "so 9,250 is held for them and 750 is free for a cover")
+    check(neurons.available(0, at_0644, ledger, frames_reserve=9250) == 0
+          and neurons.frames_done(at_0644), "once the frames are drawn nothing is held back")
+
+
+def test_the_corner_stays_empty_and_the_check_says_so(tmp):
+    for headline, attrib in (("ARMOR UP", bust.attribution(None)),
+                             ("APPRECIATE NOW", bust.attribution(None)),
+                             ("CONTROL YOUR MIND", bust.attribution("epictetus")),
+                             ("SELF DISCIPLINE", bust.attribution("marcus"))):
+        path = fake_bust(tmp / "corner.jpg")
+        img, res = bust.compose(path, headline, attrib, 1)
+        check(res["ok"], f"{headline}: every check passes ({res['problems']})")
+        # The drawn pixels in the corner are the backdrop's own: no white, no yellow.
+        corner = np.asarray(img.convert("RGB"))[bust.CORNER[1]:, bust.CORNER[0]:]
+        check(corner.max() < 140, f"{headline}: the bottom-right corner holds no type")
+    # A layout forced into the corner is caught by the measurement, not just avoided.
+    layout = bust.layout_text("ARMOR UP", bust.attribution(None))
+    layout["top"] = 600
+    with __import__("PIL.Image", fromlist=["Image"]).open(tmp / "corner.jpg") as im:
+        bg = bust.place_bust(im.convert("RGB"), bust.ground_colour(im.convert("RGB")), 1)
+    final, masks, inks = bust.draw_text(bg, layout, bust.attribution(None))
+    res = bust.check(bg, final, masks, inks, layout, np.ones((720, 1280), dtype=bool))
+    check(any("corner" in p for p in res["problems"]), "type pushed into the corner fails")
+
+
+def test_a_video_without_a_bust_is_done_first_and_old_layouts_again(tmp):
+    import scripts_refresh as r
+    db.DB_PATH = tmp / "plan.db"
+    db.init_db()
+    now = datetime(2026, 10, 19, 14, 0, tzinfo=timezone.utc)
+    ids = {}
+    for name, when in (("no_bust", "2026-10-20T18:00:00Z"), ("old_layout", "2026-10-19T18:00:00Z"),
+                       ("current", "2026-10-21T18:00:00Z"), ("public", "2026-10-15T18:00:00Z")):
+        vid = db.create_video(name)
+        db.update_video(vid, youtube_id="yt" + name, published_at=when)
+        ids[name] = vid
+    ledger = {"done": {str(ids["old_layout"]): {"layout": 1},
+                       str(ids["current"]): {"layout": r.LAYOUT}}, "spend": [], "set_log": []}
+    urgent, old = r.plan(ledger, now, 2)
+    check([v["id"] for v in urgent] == [ids["no_bust"], ids["old_layout"]],
+          "the video with no bust comes before the redo of an old layout")
+    check([v["id"] for v in old] == [ids["public"]] and ids["current"] not in
+          [v["id"] for v in urgent + old], "a public one is later, and a current one is left alone")
 
 
 def test_the_stage_uses_the_bust_and_falls_back(tmp):
@@ -298,6 +367,8 @@ if __name__ == "__main__":
         test_a_failed_check_is_drawn_again_then_the_best_is_kept(tmp)
         test_gemini_rejections_and_gemini_absence(tmp)
         test_eight_steps_refused_falls_back_to_four(tmp)
-        test_neurons_counts_the_utc_day(tmp)
+        test_neurons_count_the_pacific_day_and_hold_frames_back(tmp)
+        test_the_corner_stays_empty_and_the_check_says_so(tmp)
+        test_a_video_without_a_bust_is_done_first_and_old_layouts_again(tmp)
         test_the_stage_uses_the_bust_and_falls_back(tmp)
     print("ALL BUST THUMBNAIL TESTS PASSED")
