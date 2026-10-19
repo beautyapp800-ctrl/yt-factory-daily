@@ -1,0 +1,23 @@
+name: cf-reset-probe
+
+# One-off diagnostic: find the moment Cloudflare's daily allowance resets. Manual only.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    env:
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - run: python scripts/cf_reset_probe.py 280 | tee -a "$GITHUB_STEP_SUMMARY"
