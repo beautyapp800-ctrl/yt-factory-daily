@@ -14,13 +14,18 @@ name: thumbnail-refresh
 # at any time of year; the other finds nothing left to do. A scheduled run that GitHub starts
 # late is harmless: the Neuron budget is worked out when it starts, with the narration frames
 # of the coming run held back until they are drawn.
+#
+# PAUSED 2026-10-20: both automatic triggers are off while the thumbnail layout is being redone
+# (near-black ground, 3-4 yellow/white lines, red rule, STOICISM). Until then this workflow
+# would keep putting the old bust layout on live videos. Restore both blocks after the one-off
+# manual refresh to the new layout.
+#   schedule:
+#     - cron: "10 7 * * *"
+#     - cron: "10 8 * * *"
+#   workflow_run:
+#     workflows: ["daily"]
+#     types: [completed]
 on:
-  schedule:
-    - cron: "10 7 * * *"
-    - cron: "10 8 * * *"
-  workflow_run:
-    workflows: ["daily"]
-    types: [completed]
   workflow_dispatch:
     inputs:
       dry_run:
