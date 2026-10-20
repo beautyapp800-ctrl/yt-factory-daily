@@ -684,6 +684,83 @@ def test_a_reused_image_with_lettering_is_still_redrawn(tmp):
           f"({drawn['n'] - before} redraws)")
 
 
+SPENT = ("cloudflare HTTP 429: b'{\"errors\":[{\"message\":\"AiError: you have used up your "
+         "daily free allocation of 10,000 neurons, please upgrade\"}]}'")
+
+
+def test_a_spent_allowance_defers_the_stage_and_never_asks_pollinations(tmp):
+    print("test_a_spent_allowance_defers_the_stage_and_never_asks_pollinations")
+    from core.concede import Deferred
+    vid = _setup_video(tmp, "spent", [24, 24])   # 4 images
+    calls = {"cloudflare": 0, "pollinations": 0}
+
+    def cf(prompt, out_path, seed, cfg):
+        calls["cloudflare"] += 1
+        if calls["cloudflare"] > 2:
+            raise images.ImageError(SPENT)
+        Path(out_path).write_bytes(b"\xff\xd8\xff" + b"\x00" * 100)
+        return out_path, 96
+
+    def pollinations(prompt, out_path, seed, cfg):
+        calls["pollinations"] += 1
+        Path(out_path).write_bytes(b"\xff\xd8\xff" + b"\x00" * 100)
+
+    original = _stub(cloudflare=cf, pollinations=pollinations)
+    deferred = None
+    try:
+        stage.run(vid, {"images": {"provider": "cloudflare-only", "images_per_seconds": 12}})
+    except Deferred as e:
+        deferred = e
+    finally:
+        _restore(original)
+    check(deferred is not None and "allowance" in str(deferred),
+          f"the stage defers itself rather than finish badly ({deferred})")
+    check(calls["pollinations"] == 0, "pollinations, which stamps its logo, is never asked")
+    check(calls["cloudflare"] == 3, f"the refusal is not asked again ({calls['cloudflare']})")
+    import sqlite3
+    from contextlib import closing
+    with closing(sqlite3.connect(db.DB_PATH)) as conn:
+        msgs = [r[0] for r in conn.execute("SELECT message FROM events WHERE stage='images'")]
+    check(any("192 neurons over 2 Cloudflare calls" in m for m in msgs),
+          f"and what it did spend is on the record for core.neurons ({msgs})")
+    out = config.OUTPUT_DIR / str(vid) / "images"
+    check(len(list(out.glob("*.jpg"))) == 2, "the two frames already paid for stay on disk")
+
+
+def test_images_spend_never_passes_max_neurons(tmp):
+    print("test_images_spend_never_passes_max_neurons")
+    vid = _setup_video(tmp, "cap", [12, 12, 12])   # 3 images
+    spent = []
+
+    def cf(prompt, out_path, seed, cfg):
+        spent.append(1000)
+        Path(out_path).write_bytes(b"\xff\xd8\xff" + b"\x00" * 100)
+        return out_path, 1000
+
+    # Every frame reads as lettering, so without the cap each would be drawn four times.
+    original = _stub(cloudflare=cf, ocr_result=(12, 12))
+    try:
+        stage.run(vid, {"images": {"provider": "cloudflare-only", "images_per_seconds": 12,
+                                   "max_neurons": 3500}})
+    finally:
+        _restore(original)
+    check(sum(spent) <= 3500, f"the frames cost {sum(spent)}, within the 3,500 cap")
+    check(len(db.get_video_images(vid)) == 3, "and every slot still has a frame")
+
+
+def test_the_channel_config_draws_frames_with_cloudflare_alone():
+    print("test_the_channel_config_draws_frames_with_cloudflare_alone")
+    import json
+    cfg = json.loads((Path(__file__).resolve().parent.parent / "config.json")
+                     .read_text(encoding="utf-8"))
+    check(cfg["images"]["provider"] == "cloudflare-only",
+          "config.json never falls back to pollinations for frames")
+    frames = cfg["images"]["max_neurons"]
+    bust = cfg["thumbnail"]["candidates"] * cfg["thumbnail"]["attempts"] * 326.4
+    spare = 10000 - frames - bust
+    check(700 <= spare, f"frames {frames} + bust {bust:.0f} leave {spare:.0f} of 10,000")
+
+
 if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
@@ -710,4 +787,7 @@ if __name__ == "__main__":
         test_a_subject_that_always_carries_writing_is_replaced(tmp)
         test_images_from_an_earlier_run_are_not_paid_for_again(tmp)
         test_a_reused_image_with_lettering_is_still_redrawn(tmp)
+        test_a_spent_allowance_defers_the_stage_and_never_asks_pollinations(tmp)
+        test_images_spend_never_passes_max_neurons(tmp)
+        test_the_channel_config_draws_frames_with_cloudflare_alone()
     print("ALL IMAGES TESTS PASSED")

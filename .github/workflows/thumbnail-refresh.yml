@@ -15,10 +15,10 @@ name: thumbnail-refresh
 # late is harmless: the Neuron budget is worked out when it starts, with the narration frames
 # of the coming run held back until they are drawn.
 #
-# PAUSED 2026-10-20: both automatic triggers are off while the thumbnail layout is being redone
-# (near-black ground, 3-4 yellow/white lines, red rule, STOICISM). Until then this workflow
-# would keep putting the old bust layout on live videos. Restore both blocks after the one-off
-# manual refresh to the new layout.
+# RETIRED 2026-10-20: both automatic triggers are off for good. Videos already on the channel
+# keep the thumbnails they have; only new videos get the bust, from the daily run itself. A
+# redo of old thumbnails does not fit the free 10,000 Neurons next to the daily frames. Manual
+# dispatch is kept for --restore and for a single --only video.
 #   schedule:
 #     - cron: "10 7 * * *"
 #     - cron: "10 8 * * *"
@@ -36,10 +36,6 @@ on:
         description: "Only this video id (blank for the normal order)"
         type: string
         default: ""
-      old_per_day:
-        description: "Already-public videos to redo in this run (normally 2)"
-        type: string
-        default: "2"
       restore:
         description: "Put back the daily run's own thumbnail for these video ids (e.g. 22,23) instead of refreshing"
         type: string
@@ -99,7 +95,6 @@ jobs:
           args=""
           if [ "${{ inputs.dry_run }}" = "true" ]; then args="$args --dry-run"; fi
           if [ -n "${{ inputs.only }}" ]; then args="$args --only ${{ inputs.only }}"; fi
-          if [ -n "${{ inputs.old_per_day }}" ]; then args="$args --old-per-day ${{ inputs.old_per_day }}"; fi
           python scripts/refresh_thumbnails.py $args | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Keep the thumbnails made

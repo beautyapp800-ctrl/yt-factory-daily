@@ -260,17 +260,10 @@ def test_eight_steps_refused_falls_back_to_four(tmp):
           "a refused step count is lowered once, not given up on")
 
 
-def test_neurons_count_the_pacific_day_and_hold_frames_back(tmp):
-    from zoneinfo import ZoneInfo
-    summer = datetime(2026, 10, 19, 14, 0, tzinfo=timezone.utc)
-    check(neurons.window_start(summer) == datetime(2026, 10, 19, 7, 0, tzinfo=timezone.utc),
-          "the window turns over at 07:00 UTC in summer")
-    winter = datetime(2026, 11, 20, 14, 0, tzinfo=timezone.utc)
-    check(neurons.window_start(winter) == datetime(2026, 11, 20, 8, 0, tzinfo=timezone.utc),
-          "and at 08:00 UTC once the clocks have gone back")
-    check(neurons.window_start(datetime(2026, 10, 19, 6, 44, tzinfo=timezone.utc))
-          == datetime(2026, 10, 18, 7, 0, tzinfo=timezone.utc),
-          "06:44 UTC still belongs to the window that began the day before")
+def test_neurons_count_a_rolling_day_and_hold_frames_back(tmp):
+    now = datetime(2026, 10, 19, 14, 0, tzinfo=timezone.utc)
+    check(neurons.window_start(now) == datetime(2026, 10, 18, 14, 0, tzinfo=timezone.utc),
+          "the window is the last 24 hours, not a calendar day")
 
     db.DB_PATH = tmp / "n.db"
     db.init_db()
@@ -286,18 +279,22 @@ def test_neurons_count_the_pacific_day_and_hold_frames_back(tmp):
                      (vid, "64 made, 32 redrawn for lettering, 9216 neurons over 96 Cloudflare "
                            "calls", "2026-10-19T06:23:38+00:00"))
         conn.commit()
-    at_0644 = datetime(2026, 10, 19, 6, 44, tzinfo=timezone.utc)
-    spent = neurons.spent_today(at_0644, ledger)
-    check(spent == 9216 + 979,
-          f"the evening's 979 and the morning's frames are one window, as Cloudflare said ({spent})")
-    check(neurons.available(300, at_0644, ledger) == 0, "so nothing is free for the cover then")
-    after = datetime(2026, 10, 19, 14, 0, tzinfo=timezone.utc)
-    check(neurons.spent_today(after, ledger) == 0 and not neurons.frames_done(after),
-          "after 07:00 the window is empty and the next frames are still to come")
-    check(neurons.available(0, after, ledger, frames_reserve=9250) == 750,
-          "so 9,250 is held for them and 750 is free for a cover")
-    check(neurons.available(0, at_0644, ledger, frames_reserve=9250) == 0
-          and neurons.frames_done(at_0644), "once the frames are drawn nothing is held back")
+    # What the probe saw on 19 October: shut at 14:42, open at 18:29 UTC.
+    shut = datetime(2026, 10, 19, 14, 42, tzinfo=timezone.utc)
+    spent = neurons.spent_today(shut, ledger)
+    check(spent == 9216 + 979, f"at 14:42 the evening's 979 and the morning's frames are both "
+                               f"inside the window, over 10,000 with the probe ({spent})")
+    check(neurons.available(300, shut, ledger) == 0, "so nothing is free then")
+    opened = datetime(2026, 10, 19, 18, 29, tzinfo=timezone.utc)
+    check(neurons.spent_today(opened, ledger) == 9216,
+          "at 18:29 the 979 from 18:08 the day before has dropped out, as Cloudflare showed")
+    check(neurons.available(0, opened, ledger) == 784 and neurons.frames_done(opened),
+          "leaving 784, and the frames inside the window hold nothing back")
+    next_day = datetime(2026, 10, 20, 7, 0, tzinfo=timezone.utc)
+    check(neurons.spent_today(next_day, ledger) == 0 and not neurons.frames_done(next_day),
+          "a day after the frames the window is empty and the next frames are still to come")
+    check(neurons.available(0, next_day, ledger, frames_reserve=9250) == 750,
+          "so 9,250 is held for them and 750 is free")
 
 
 def test_the_corner_stays_empty_and_the_check_says_so(tmp):
@@ -407,7 +404,7 @@ if __name__ == "__main__":
         test_a_failed_check_is_drawn_again_then_the_best_is_kept(tmp)
         test_gemini_rejections_and_gemini_absence(tmp)
         test_eight_steps_refused_falls_back_to_four(tmp)
-        test_neurons_count_the_pacific_day_and_hold_frames_back(tmp)
+        test_neurons_count_a_rolling_day_and_hold_frames_back(tmp)
         test_the_corner_stays_empty_and_the_check_says_so(tmp)
         test_a_video_without_a_bust_is_done_first_and_old_layouts_again(tmp)
         test_the_stage_uses_the_bust_and_falls_back(tmp)

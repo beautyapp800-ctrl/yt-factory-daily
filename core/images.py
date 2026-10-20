@@ -72,7 +72,17 @@ _NOT_WORTH_RETRYING = re.compile(r"auth rejected|not set in \.env|quota|limit", 
 
 def _worth_asking_again(error):
     text = str(error)
-    return bool(_WORTH_RETRYING.search(text)) and not _NOT_WORTH_RETRYING.search(text)
+    return (bool(_WORTH_RETRYING.search(text)) and not _NOT_WORTH_RETRYING.search(text)
+            and not allowance_spent(text))
+
+
+_ALLOWANCE_SPENT = re.compile(r"daily free allocation|\b4006\b", re.I)
+
+
+def allowance_spent(error):
+    """True when Cloudflare refused because the account's free Neurons are used up, which
+    asking again will not change until earlier spending drops out of its window."""
+    return bool(_ALLOWANCE_SPENT.search(str(error)))
 
 
 def cloudflare_available():

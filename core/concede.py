@@ -37,3 +37,13 @@ def concede(video_id, stage, problem, using=None):
 def impossible(stage, problem):
     """The one kind of failure that is still allowed to stop a run."""
     return RuntimeError(f"{stage}: nothing can be assembled - {problem}")
+
+
+class Deferred(RuntimeError):
+    """A stage that cannot be done properly today and must not be done badly.
+
+    Raised when the only way to finish would put something into a published video that may
+    never be there - a picture with another service's logo on it. The video is left where it
+    is and carried on with by the next run, with what was already made kept; it does not count
+    as a failed attempt. The queue on YouTube is days deep, which is what pays for the wait.
+    """

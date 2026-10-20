@@ -48,8 +48,9 @@
   },
   "image_style": "cinematic painterly illustration, wide horizontal composition, key subject within the central horizontal band, cinematic framing, muted earth tones, marble and weathered stone, soft volumetric light, quiet atmosphere, no text, no lettering, no watermark, no modern branding",
   "images": {
-    "provider": "cloudflare",
-    "images_per_seconds": 26,
+    "provider": "cloudflare-only",
+    "images_per_seconds": 30,
+    "max_neurons": 8900,
     "cloudflare": {
       "model": "@cf/black-forest-labs/flux-1-schnell",
       "steps": 2
@@ -148,8 +149,8 @@
   "buffer_days": 1,
   "thumbnail": {
     "style": "bust",
-    "candidates": 4,
-    "attempts": 3,
+    "candidates": 1,
+    "attempts": 1,
     "steps": 8,
     "fallback_steps": 4,
     "reserve_neurons": 300,

@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 import time
 from zoneinfo import ZoneInfo
 from core import db
-from core.concede import concede
+from core.concede import Deferred, concede
 from core.config import ConfigError, load_config
 from core.logger import get_logger
 from pipeline import images, render, script, seo, thumbnail, topic, tts, upload
@@ -80,6 +80,9 @@ def _discard_narration(video_id):
 def process_video(video_id, cfg):
     """Run all stages for one video. Never raises: failures are recorded as status=failed.
 
+    Returns True when finished, False when failed, and None when a stage deferred itself to
+    the next run (core.concede.Deferred): the video keeps its status and is carried on with.
+
     After the narration is voiced its length is checked; a script outside the window is
     discarded and written again, up to config.length_gate.attempts times, within this run.
     """
@@ -124,6 +127,13 @@ def process_video(video_id, cfg):
                     done -= set(LENGTH_STAGES)
                     index = next(i for i, s in enumerate(STAGES) if s[0] == LENGTH_STAGES[0])
                     continue
+        except Deferred as e:
+            log.warning("video %s: stage %s deferred to the next run: %s", video_id, name, e)
+            try:
+                db.log_event(video_id, name, "warning", f"deferred to the next run: {e}")
+            except Exception as db_err:                              # noqa: BLE001
+                log.error("could not record the deferral in DB: %s", db_err)
+            return None
         except Exception as e:
             if name in OPTIONAL_STAGES:
                 # A video with a default thumbnail or a plain description is
@@ -204,6 +214,13 @@ def build_until_buffered(cfg):
         db.update_video(video_id, attempts=attempts)
 
         ok = process_video(video_id, cfg)
+        if ok is None:
+            # Waiting for an allowance is not a failed attempt: three days of it must not
+            # abandon a video whose narration is already paid for.
+            db.update_video(video_id, attempts=attempts - 1)
+            return made, (f"video {video_id} is waiting for the image allowance and will be "
+                          f"carried on with by the next run; the buffer is "
+                          f"{queue_depth_days(cfg)} of {target} days")
         if ok:
             made += 1
             # A finished video that did not deepen the queue means it never

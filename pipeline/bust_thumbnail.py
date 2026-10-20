@@ -17,27 +17,26 @@ No name goes under the phrase. The phrase is written by a language model, and si
 which philosopher it leans on, but only to choose whose likeness the bust has.
 
 How the bust is got. Cloudflare's flux-1-schnell, the same model the narration frames use,
-at more steps than they get, three or four candidates at a time. Gemini looks at the
-candidates side by side and picks the one with real-looking marble, an undeformed face, no
-lettering of its own and the right composition. If Gemini is not available the pick falls to
-measurements and OCR.
+at more steps than they get. One candidate a day (config thumbnail.candidates and attempts are
+both 1): the free 10,000 Neurons cover the day's frames, one bust and a margin, and no more.
+Gemini still looks at it and says whether the marble is real, the face whole and the picture
+free of lettering; if Gemini is not available the measurements and OCR decide.
 
 How the result is checked. Every composed thumbnail is measured: the bust's mass sits in
 the left part of the frame and stays out of the type, every line of type is inside the frame
 and still readable at 210x118, the size a phone feed shows (cap height and WCAG contrast
-against what is behind it), and the ground is close to black. A thumbnail that fails is drawn again with fresh candidates, up to
-three times; after that the best one made is used anyway, because a weaker thumbnail costs a
-little and a missing video costs the day.
+against what is behind it), and the ground is close to black. With more attempts configured
+a thumbnail that fails is drawn again; with one, or once they are used, the best one made is
+used anyway, because a weaker thumbnail costs a little and a missing video costs the day.
 
-Neurons. The narration frames come first: this runs after them and spends only what
-core.neurons says the UTC day has left over, keeping its reserve. Less room means fewer
-candidates; no room at all means no bust today and the caller falls back to the older
-thumbnail. Pollinations is not used: it stamps its logo on the picture and does not draw
-marble - both were caught on the first live run.
+Neurons. The narration frames come first and are capped (config images.max_neurons); this
+runs after them and spends only what core.neurons says the last 24 hours have left, keeping
+its reserve. No room means no bust today and the caller falls back to the older thumbnail,
+which needs no new pictures. Pollinations is not used: it stamps its logo on the picture and
+does not draw marble - both were caught on the first live run.
 
 Measured live on 18 October: flux-1-schnell costs about 19 + 38 Neurons a step, so 326 an
-image at 8 steps against 96 at the frames' 2. After a day's frames there is room for about
-three candidates, which is why the count is set by the budget rather than fixed.
+image at 8 steps against 96 at the frames' 2.
 """
 import io
 import json
@@ -71,8 +70,8 @@ LABEL = "STOICISM"
 LINE_COLOURS = (YELLOW, WHITE)          # alternating, top line first
 
 DEFAULTS = {
-    "candidates": 4,
-    "attempts": 3,
+    "candidates": 1,
+    "attempts": 1,
     "steps": 8,
     "fallback_steps": 4,             # if the model refuses 8
     "reserve_neurons": neurons.DEFAULT_RESERVE,

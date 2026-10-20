@@ -19,6 +19,7 @@ import run as runner  # noqa: E402
 # Captured before any test swaps it out: the earlier tests stub
 # runner.queue_depth_days, and this is the real one under test.
 REAL_DEPTH = runner.queue_depth_days
+REAL_PROCESS = runner.process_video
 
 CFG = {"timezone": "Europe/Kiev", "publish_time": "21:00", "buffer_days": 3,
        "run_time_budget_min": 240, "publish_days_ahead": 3}
@@ -97,6 +98,55 @@ def test_depth_counts_whole_days_ahead():
     check(REAL_DEPTH(CFG, now=now) == 0, "an empty queue is zero days")
 
 
+def test_a_deferred_video_is_carried_on_and_not_counted_as_a_failure(tmp):
+    print("test_a_deferred_video_is_carried_on_and_not_counted_as_a_failure")
+    _fresh(tmp, "deferred")
+    runner.queue_depth_days = lambda cfg, now=None: 2
+    vid = db.create_video("waiting for the allowance")
+    db.update_video(vid, status="images")
+    real = runner.process_video
+    seen = []
+    runner.process_video = lambda v, cfg: seen.append(v) or None
+    try:
+        made, because = runner.build_until_buffered({**CFG, "buffer_days": 5})
+    finally:
+        runner.process_video = real
+    check(seen == [vid], f"the waiting video was the one carried on with ({seen})")
+    check(made == 0 and "waiting for the image allowance" in because,
+          f"the run stops and says why ({because})")
+    check((db.get_video(vid).get("attempts") or 0) == 0,
+          "and the wait did not use up one of its attempts")
+    again = db.oldest_unfinished(runner.MAX_ATTEMPTS)
+    check(again is not None and again["id"] == vid, "so the next run picks it up again")
+
+
+def test_process_video_returns_none_when_a_stage_defers(tmp):
+    print("test_process_video_returns_none_when_a_stage_defers")
+    _fresh(tmp, "defer_stage")
+    from core.concede import Deferred
+    vid = db.create_video("t")
+    stages = runner.STAGES
+
+    class Stage:
+        def __init__(self, deferred=False):
+            self.deferred = deferred
+
+        def run(self, video_id, cfg):
+            if self.deferred:
+                raise Deferred("Cloudflare's free allowance is spent")
+            return True
+    runner.STAGES = [("topic", Stage(), "pending"), ("images", Stage(True), "images"),
+                     ("render", Stage(), "rendering")]
+    try:
+        got = REAL_PROCESS(vid, CFG)
+    finally:
+        runner.STAGES = stages
+    video = db.get_video(vid)
+    check(got is None, f"process_video reports a deferral, not a failure ({got})")
+    check(video["status"] == "images" and not video.get("error"),
+          f"the video waits at the images stage, not failed ({video['status']})")
+
+
 if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as d:
         tmp = Path(d)
@@ -108,6 +158,8 @@ if __name__ == "__main__":
             test_stops_on_a_video_that_cannot_be_assembled(tmp)
             test_stops_when_a_finished_video_never_reaches_youtube(tmp)
             test_depth_counts_whole_days_ahead()
+            test_a_deferred_video_is_carried_on_and_not_counted_as_a_failure(tmp)
+            test_process_video_returns_none_when_a_stage_defers(tmp)
         finally:
             runner.process_video, runner.queue_depth_days = real_process, real_depth
             db.last_scheduled_publish = real_last

@@ -11,10 +11,18 @@ render stage shows each image once, it is also the length of a shot: at 22 it me
 buys a faster cut at a proportionally higher Neuron cost - 96 Neurons per image
 against 10,000 a day.
 
-Fallback order per image: Cloudflare Workers AI, then pollinations.ai, then - only
-if both fail - duplicate whichever image most recently succeeded anywhere in this
-video, rather than leave that slot with nothing. The very first image of the video
-has nothing to duplicate yet, so a failure there is a genuine gap, logged as such.
+Cloudflare Workers AI draws every frame; config images.provider is "cloudflare-only".
+pollinations.ai is no longer a fallback here: it stamps its logo on the picture even
+when asked not to, and a published video must never carry another service's mark. If
+one frame fails for a passing reason, the image that most recently succeeded in this
+video is duplicated into its slot. If Cloudflare refuses because the free allowance is
+spent, the stage is deferred instead (core.concede.Deferred): what was drawn stays on
+disk and the next run carries on from there.
+
+Spending is capped per video at config images.max_neurons, redraws for lettering
+included, so that the day's bust thumbnail and a margin are always left of the 10,000.
+The cap is what makes the margin certain; images_per_seconds only sets how close to the
+cap a typical video comes.
 
 Before any generation, every scene's image_prompt is checked against
 core.prompts.IMAGE_BANNED_WORDS (phone, box, label, logo...) and rewritten by the
@@ -38,6 +46,7 @@ import re
 from pathlib import Path
 
 from core import db, images, ocr
+from core.concede import Deferred
 from core.config import output_dir
 from core.llm import complete
 from core.logger import get_logger
@@ -55,6 +64,9 @@ DAILY_FREE_NEURONS = 10000
 # spends its last Neurons regenerating a picture that is merely imperfect has nothing left
 # for the pictures that do not exist yet.
 NEURON_RESERVE = 300
+# The most one video's frames may cost, redraws included, when config does not say. 10,000
+# less a one-candidate bust (326) less a margin of about 770 for what nobody counted.
+DEFAULT_MAX_NEURONS = 8900
 
 # Checking a finished image for rendered lettering. Strict on purpose - see core.ocr - and
 # a flagged image is drawn again with a different seed, so a false alarm costs 96 Neurons
@@ -81,8 +93,8 @@ def _project_neuron_budget(samples, total_planned):
              projected, total_planned, DAILY_FREE_NEURONS)
     if projected > DAILY_FREE_NEURONS:
         log.warning("projected %.0f neurons EXCEEDS the %d/day free budget by %.0f; "
-                    "cut images_per_seconds, or split across two days, or lean on "
-                    "the pollinations fallback more", projected, DAILY_FREE_NEURONS,
+                    "raise images_per_seconds; images.max_neurons stops the stage "
+                    "before it gets there", projected, DAILY_FREE_NEURONS,
                     projected - DAILY_FREE_NEURONS)
     else:
         headroom = DAILY_FREE_NEURONS - projected
@@ -228,12 +240,28 @@ def _reads_as_text(path):
 
 
 def run(video_id, cfg):
+    """Draw the frames. Whatever happens, what was spent is written down: on 20 October a
+    run died on a timeout after about forty paid frames, logged nothing, and every Neuron
+    estimate after it was wrong by that much."""
+    tally = {"neurons": 0.0, "calls": 0}
+    try:
+        return _run(video_id, cfg, tally)
+    except BaseException as e:
+        if tally["calls"]:
+            db.log_event(video_id, "images", "warning",
+                         f"stage stopped ({type(e).__name__}) after {tally['neurons']:.0f} "
+                         f"neurons over {tally['calls']} Cloudflare calls")
+        raise
+
+
+def _run(video_id, cfg, tally):
     scenes = db.get_scenes(video_id)
     if not scenes:
         raise RuntimeError("no scenes to illustrate; did the script stage run?")
 
     images_per_seconds = (cfg.get("images") or {}).get(
         "images_per_seconds", DEFAULT_IMAGES_PER_SECONDS)
+    max_neurons = float((cfg.get("images") or {}).get("max_neurons", DEFAULT_MAX_NEURONS))
     cf_note = "available" if images.cloudflare_available() else \
         "unavailable (CLOUDFLARE_ACCOUNT_ID/CLOUDFLARE_API_TOKEN not set)"
     ocr_note = "available" if ocr.available() else "unavailable (Tesseract not installed)"
@@ -312,12 +340,12 @@ def run(video_id, cfg):
                         remaining = total_planned - done - 1
                         per_image = (sum(neuron_samples) / len(neuron_samples)
                                      if neuron_samples else 96)
-                        if neurons_total + per_image * (remaining + 1) > \
-                                DAILY_FREE_NEURONS - NEURON_RESERVE:
+                        if neurons_total + per_image * (remaining + 1) > max_neurons:
                             log.warning("scene %d image %d: keeping a frame with lettering "
                                         "(%d characters); redrawing it would leave too "
-                                        "little of the daily allowance for the %d images "
-                                        "still to make", scene["idx"], i + 1, chars, remaining)
+                                        "little of this video's %.0f Neurons for the %d "
+                                        "images still to make", scene["idx"], i + 1, chars,
+                                        max_neurons, remaining)
                             break
                     try:
                         # A different seed each attempt, so a provider that honours seed
@@ -325,12 +353,18 @@ def run(video_id, cfg):
                         used, neurons = images.synthesize(
                             prompt, out_path, base_seed + 500 * attempt, cfg)
                     except images.ImageError as e:
+                        if images.allowance_spent(e):
+                            raise Deferred(
+                                f"Cloudflare's free allowance is spent with {done} of "
+                                f"{total_planned} frames settled; the rest are drawn by the "
+                                f"next run rather than by a service that marks them") from e
                         error = e
                         break
                     provider, error, generated = used, None, True
                     if used == "cloudflare":
                         cf_calls += 1
                         neurons_total += neurons or 0
+                        tally.update(neurons=neurons_total, calls=cf_calls)
                         if neurons is not None and len(neuron_samples) < NEURON_SAMPLE_SIZE:
                             neuron_samples.append(neurons)
                             log.info("neuron sample %d/%d: %.1f", len(neuron_samples),
@@ -358,6 +392,7 @@ def run(video_id, cfg):
                     if provider == "cloudflare":
                         cf_calls += 1
                         neurons_total += neurons or 0
+                        tally.update(neurons=neurons_total, calls=cf_calls)
                 if not cleared:
                     db.log_event(video_id, "images", "warning",
                                  f"scene {scene['idx']} image {i + 1} still shows lettering "

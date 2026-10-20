@@ -6,14 +6,19 @@ with "<n> neurons" in it, and the thumbnail refresh job keeps its own ledger in
 data/thumb_refresh.json (it runs outside the video pipeline and does not write the
 database).
 
-The window is the day of America/Los_Angeles, i.e. it turns over at 07:00 UTC in summer and
-08:00 UTC after the clocks go back, not at 00:00 UTC as the documentation says. Inferred from
-the record, and it is the only reading that fits all of it: Cloudflare refused the bust on
-19 October at 06:44 UTC after 9,216 Neurons of frames, which only adds up to 10,000 with the
-979 spent at 18:08 UTC the evening before; the frames of 16, 17 and 18 October, drawn between
-05:15 and 06:25 UTC each, each had a full allowance; and the probes in the README are blocked
-at 06:46 UTC and open at 20:50 and 07:29 UTC. So the daily frames, which run at 05-06 UTC, are
-the LAST spend of a window, and everything drawn after 07:00 UTC belongs to the next one.
+The window is the last 24 hours, rolling: a Neuron spent comes back a day later to the
+minute, not at a fixed time of day. The first reading of the record was a window turning over
+at Pacific midnight (07:00 UTC), and scripts/cf_reset_probe.py disproved it: on 19 October the
+allowance stayed shut from 14:42 to 18:28 UTC and opened at 18:29 UTC - just as the 979
+Neurons spent at 18:08 UTC the day before dropped out of a 24-hour window, leaving that
+morning's 9,216 inside it. The rolling window fits every other observation too (the refusal at
+06:44 UTC on the 19th, the frames of the 16th to the 18th each finding a full allowance at
+about the same time of day as the day before).
+
+What follows from it: the daily run draws at roughly the same hour each day, so yesterday's
+frames leave the window about as fast as today's enter it; a run that starts much earlier than
+yesterday's finds less room. Spending this project did not log is invisible here, so the
+figure is an estimate and Cloudflare's refusal remains the final word.
 
 The narration frames come first. The thumbnail stage runs after them, so whatever it sees
 here is what they left; the refresh job runs only after a successful daily run and keeps
@@ -21,13 +26,12 @@ the same reserve.
 """
 import json
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 from core import db
 
-RESET_ZONE = ZoneInfo("America/Los_Angeles")
+WINDOW = timedelta(hours=24)
 DAILY_FREE_NEURONS = 10000
 DEFAULT_RESERVE = 300
 LEDGER_PATH = Path(__file__).resolve().parent.parent / "data" / "thumb_refresh.json"
@@ -54,9 +58,8 @@ def load_ledger(path=LEDGER_PATH):
 
 
 def window_start(now=None):
-    """The moment the current allowance window began, as an aware UTC datetime."""
-    now = (now or datetime.now(timezone.utc)).astimezone(RESET_ZONE)
-    return now.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
+    """The moment the current allowance window began - 24 hours ago - as aware UTC."""
+    return (now or datetime.now(timezone.utc)).astimezone(timezone.utc) - WINDOW
 
 
 def window_events(stage_like, now=None):
