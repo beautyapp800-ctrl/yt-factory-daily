@@ -19,6 +19,12 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
+      - name: Install ffmpeg
+        # The TTS stage checks for ffmpeg before it does anything, stubbed audio or not, so
+        # test_tts.py failed on every push without it.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg
       - name: Install dependencies
         run: |
           pip install -r requirements.txt

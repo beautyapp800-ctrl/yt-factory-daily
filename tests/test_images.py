@@ -58,6 +58,7 @@ def _stub(cloudflare=None, pollinations=None, available=True, ocr_result=(0, 0),
         "synthesize_pollinations": images.synthesize_pollinations,
         "cloudflare_available": images.cloudflare_available,
         "ocr.detect_text": ocr.detect_text,
+        "ocr.available": ocr.available,
         "stage.complete": stage.complete,
     }
     if cloudflare is not None:
@@ -66,6 +67,9 @@ def _stub(cloudflare=None, pollinations=None, available=True, ocr_result=(0, 0),
         images.synthesize_pollinations = pollinations
     images.cloudflare_available = lambda: available
     ocr.detect_text = lambda path, **kw: ocr_result
+    # The stage asks whether Tesseract is installed before it reads anything. CI runners do
+    # not have it, and without this the lettering tests silently tested nothing there.
+    ocr.available = lambda: True
     stage.complete = llm_complete or (lambda prompt, **kw: "a plain rewritten scene")
     return original
 
@@ -75,6 +79,7 @@ def _restore(original):
     images.synthesize_pollinations = original["synthesize_pollinations"]
     images.cloudflare_available = original["cloudflare_available"]
     ocr.detect_text = original["ocr.detect_text"]
+    ocr.available = original["ocr.available"]
     stage.complete = original["stage.complete"]
 
 
