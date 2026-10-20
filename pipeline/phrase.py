@@ -71,7 +71,10 @@ def _words(text):
     return _WORD.findall(text or "")
 
 
-def _prompt(topic, promise, lessons, title, complaints=()):
+_COUNTS = {2: "TWO", 3: "THREE", 4: "FOUR"}
+
+
+def _prompt(topic, promise, lessons, title, complaints=(), min_words=MIN_WORDS):
     listed = "\n".join(f"- {l}" for l in lessons[:10])
     prompt = f"""This video is about: {topic}
 
@@ -83,7 +86,7 @@ The lessons in it:
 Write ONE thumbnail phrase for it.
 
 Rules, all of them hard:
-- TWO to FOUR words. Not five, not one.
+- {_COUNTS[min_words]} to FOUR words. Not five, not {"one" if min_words == 2 else "one or two"}.
 - A finished thought. Someone who sees only these words, with no title underneath and no
   picture around them, must understand something. "WHILE PROGRESS DRAGS" and "WHILE STAYING
   TRUE" are failures: they are the middle of a sentence nobody can see.
@@ -105,11 +108,12 @@ Return JSON: {{"phrase": "YOUR PHRASE"}}"""
     return prompt
 
 
-def problems(phrase, title="", fits=None):
+def problems(phrase, title="", fits=None, min_words=MIN_WORDS):
     """Why a phrase is unusable. An empty list means it passes.
 
     `fits` is an optional callable the caller supplies that answers whether the phrase can
-    actually be set on the thumbnail at a readable size. The type is heavy condensed capitals
+    actually be set on the thumbnail at a readable size. `min_words` is raised by a layout
+    that sets one word to a line and needs three lines or more. The type is heavy condensed capitals
     a third of the frame tall, which leaves room for about eight characters on the large line,
     so a perfectly good thought made of long words - "SILENCE SHATTERS ARGUMENTS" - cannot be
     drawn. Rather than writing a character limit here and hoping it matches the layout, the
@@ -120,8 +124,8 @@ def problems(phrase, title="", fits=None):
     out = []
     if not words:
         return ["the phrase has no words in it"]
-    if not MIN_WORDS <= len(words) <= MAX_WORDS:
-        out.append(f'"{phrase}" is {len(words)} words, needs {MIN_WORDS} to {MAX_WORDS}')
+    if not min_words <= len(words) <= MAX_WORDS:
+        out.append(f'"{phrase}" is {len(words)} words, needs {min_words} to {MAX_WORDS}')
     if words[0].lower() in BANNED_OPENERS:
         out.append(f'"{phrase}" begins with "{words[0]}", which is a joining word: the phrase '
                    f"reads as the middle of a sentence. Begin on a noun, verb or adjective")
@@ -158,7 +162,8 @@ def problems(phrase, title="", fits=None):
     return out
 
 
-def write_phrase(topic, promise, lessons, title, attempts=ATTEMPTS, fits=None):
+def write_phrase(topic, promise, lessons, title, attempts=ATTEMPTS, fits=None,
+                 min_words=MIN_WORDS):
     """(phrase, complaints). complaints is empty when the phrase passed every rule.
 
     On failure the last candidate is returned with its complaints, so the caller can decide
@@ -166,11 +171,11 @@ def write_phrase(topic, promise, lessons, title, attempts=ATTEMPTS, fits=None):
     """
     complaints, phrase = [], ""
     for attempt in range(1, attempts + 1):
-        data = complete_json(_prompt(topic, promise, lessons, title, complaints),
+        data = complete_json(_prompt(topic, promise, lessons, title, complaints, min_words),
                              system=SYSTEM, max_tokens=200, temperature=0.9)
         phrase = (data or {}).get("phrase") if isinstance(data, dict) else ""
         phrase = re.sub(r"\s+", " ", str(phrase or "")).strip().strip('"“”')
-        complaints = problems(phrase, title, fits)
+        complaints = problems(phrase, title, fits, min_words)
         if not complaints:
             log.info("thumbnail phrase: %r (attempt %d)", phrase, attempt)
             return phrase, []

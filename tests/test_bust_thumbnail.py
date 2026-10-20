@@ -86,37 +86,63 @@ def _stub(cf_costs=96, centre=0.5, vision=None, cf_error=None, steps_seen=None):
     bust.vision_json = vision or (lambda prompt, imgs, model=None: {"images": [
         {"index": i, "marble": 8, "face_ok": True, "text": False, "composition": 8,
          "likeness": 7} for i in range(len(imgs))], "best": 0})
-    bust.complete_json = lambda *a, **k: {"headline": "SELF DISCIPLINE"}
+    phrase.complete_json = lambda *a, **k: {"phrase": "DISCIPLINE BUILDS FREEDOM"}
     return calls
 
 
 def _restore():
     bust.image_api.synthesize_cloudflare = _forbidden
     bust.vision_json = _forbidden
-    bust.complete_json = _forbidden
+    phrase.complete_json = _forbidden
 
 
-def test_a_philosopher_is_named_only_when_the_script_leans_on_him():
+def test_the_bust_is_chosen_by_the_script_but_nobody_is_named():
     key, _ = bust.philosopher_for("Marcus Aurelius wrote. " * 7 + "Seneca said. " * 3)
-    check(key == "marcus", "seven mentions against three names Marcus Aurelius")
+    check(key == "marcus", "seven mentions against three pick Marcus Aurelius's likeness")
     key, _ = bust.philosopher_for("Seneca. " * 5 + "Marcus Aurelius. " * 5)
-    check(key is None, "a tie names nobody")
+    check(key is None, "a tie picks nobody")
     key, _ = bust.philosopher_for("Epictetus taught. " * 2)
-    check(key is None, "two passing mentions name nobody")
-    check(bust.attribution(None) == "– STOIC WISDOM", "nobody named reads STOIC WISDOM")
-    check(bust.attribution("epictetus") == "– EPICTETUS", "the dash and the name")
+    check(key is None, "two passing mentions pick nobody")
     check("Seneca" in bust.bust_prompt("seneca") and "marble bust" in bust.bust_prompt(None),
-          "the bust drawn is the philosopher named")
+          "the bust drawn is the philosopher the script leans on")
+    prompt = bust.bust_prompt(None)
+    check("black background" in prompt and "no hands" in prompt and "no text" in prompt,
+          "the bust is asked for on black, with no hands and no lettering")
+    check(not hasattr(bust, "attribution"),
+          "no name is put under the phrase: the model wrote it, not Seneca")
 
 
-def test_the_headline_rules():
-    check(not bust.headline_problems("SELF DISCIPLINE"), "SELF DISCIPLINE is accepted")
-    check(bust.headline_problems("THE MIND"), "an opening article is refused")
-    check(bust.headline_problems("STOIC WISDOM"), "the niche's own words are refused")
-    check(bust.headline_problems("ONE TWO THREE FOUR"), "four words are refused")
-    check(bust.headline_problems("FEAR, NOTHING"), "punctuation is refused")
-    got = bust.headline_from_title("10 Stoic Lessons to Master the Pause")
-    check(got == "MASTER PAUSE", f"the title fallback keeps the content words ({got})")
+def test_the_words_come_from_phrase_py():
+    answers = iter([{"phrase": "ANGER COSTS"}, {"phrase": "ANGER COSTS MORE"}])
+    asked = []
+
+    def model(prompt, **k):
+        asked.append(prompt)
+        return next(answers)
+    phrase.complete_json = model
+    try:
+        got = bust.headline_for("10 Ways to Stay Calm", "anger")
+    finally:
+        phrase.complete_json = _forbidden
+    check(got == ("ANGER COSTS MORE", "phrase"),
+          f"a two-word phrase is sent back and the three-word one is used ({got})")
+    check("THREE to FOUR words" in asked[0], "the model is asked for three or four words")
+
+    def broken(*a, **k):
+        raise RuntimeError("no model")
+    phrase.complete_json = broken
+    try:
+        got = bust.headline_for("10 Stoic Lessons to Master the Pause", "pause")
+        bad = bust.headline_for("10 Morning Habits To Stop Right Now For Real Calm", "calm")
+    finally:
+        phrase.complete_json = _forbidden
+    check(got == ("MASTER THE PAUSE", "title"), f"with no model the title is used whole ({got})")
+    check(bad == (bust.FALLBACK_HEADLINE, "fallback"),
+          f"a title too long to stack gives the fixed line ({bad})")
+    check(bust.headline_from_title("10 Ways to Strip Emotion From Criticism")
+          == "STRIP EMOTION FROM CRITICISM", "the title's small words are not dropped")
+    check(not bust.fits("ANGER COSTS") and not bust.fits("ONE TWO THREE FOUR FIVE")
+          and bust.fits("SILENCE OUTLASTS EVERY INSULT"), "fits() wants three or four words")
 
 
 def test_a_bust_thumbnail_is_made_checked_and_costed(tmp):
@@ -132,13 +158,26 @@ def test_a_bust_thumbnail_is_made_checked_and_costed(tmp):
     check(len(calls) == 4, "four candidates on the first attempt, and no second attempt")
     check(d["neurons"] == 384 and d["neurons_per_image"] == 96,
           "the Neurons are the ones Cloudflare reported")
-    check(d["attribution"].endswith("MARCUS AURELIUS"), "Marcus is named")
+    check(d["philosopher"] == "marcus" and d["headline"] == "DISCIPLINE BUILDS FREEDOM"
+          and d["headline_source"] == "phrase", "Marcus's bust, under the phrase from phrase.py")
     line = bust.summary(d)
     check("384 neurons" in line, "the event line carries the spend for core.neurons")
+    check(f"[layout {bust.LAYOUT}]" in line, "and the layout, so the refresh can tell")
     with Image.open(d["path"]) as img:
-        lum = np.asarray(img.convert("L"), dtype=np.float64)
-    check((lum < 16).mean() < 0.02, "no black ground")
+        rgb = np.asarray(img.convert("RGB"), dtype=np.int32)
+    lum = rgb @ np.array([2126, 7152, 722]) / 10000
     check(lum[:, :500].std() > lum[:, 900:].std() * 0.5, "the bust is on the left")
+    right = rgb[:, round(1280 * bust.TEXT_LEFT):]
+    check(np.median(lum[:, round(1280 * bust.TEXT_LEFT):]) < bust.MAX_GROUND_LUM,
+          "the ground behind the type is almost black")
+    r, g, b = right[..., 0], right[..., 1], right[..., 2]
+    yellow = ((r > 220) & (g > 170) & (b < 80)).sum()
+    white = ((r > 225) & (g > 225) & (b > 225)).sum()
+    red = ((r > 170) & (g < 70) & (b < 70)).sum()
+    check(yellow > 5000 and white > 5000, f"yellow and white type ({yellow}, {white} px)")
+    check(500 < red < 6000, f"a thin red rule ({red} px)")
+    with Image.open(d["small"]) as small:
+        check(small.size == (210, 118), "thumb_small.jpg is the 210x118 the feed shows")
 
 
 def test_a_small_budget_buys_fewer_candidates(tmp):
@@ -262,22 +301,23 @@ def test_neurons_count_the_pacific_day_and_hold_frames_back(tmp):
 
 
 def test_the_corner_stays_empty_and_the_check_says_so(tmp):
-    for headline, attrib in (("ARMOR UP", bust.attribution(None)),
-                             ("APPRECIATE NOW", bust.attribution(None)),
-                             ("CONTROL YOUR MIND", bust.attribution("epictetus")),
-                             ("SELF DISCIPLINE", bust.attribution("marcus"))):
+    for headline in ("ANGER COSTS MORE", "SILENCE OUTLASTS EVERY INSULT",
+                     "FEAR SHRINKS IN DAYLIGHT", "STRIP EMOTION FROM CRITICISM",
+                     bust.FALLBACK_HEADLINE):
         path = fake_bust(tmp / "corner.jpg")
-        img, res = bust.compose(path, headline, attrib, 1)
+        img, res = bust.compose(path, headline, 1)
         check(res["ok"], f"{headline}: every check passes ({res['problems']})")
+        check(3 <= res["lines"] <= 4 and res["head_cap_px"] >= bust.MIN_HEAD_CAP_PX,
+              f"{headline}: {res['lines']} lines, capitals {res['head_cap_px']}px at 210x118")
         # The drawn pixels in the corner are the backdrop's own: no white, no yellow.
         corner = np.asarray(img.convert("RGB"))[bust.CORNER[1]:, bust.CORNER[0]:]
         check(corner.max() < 140, f"{headline}: the bottom-right corner holds no type")
     # A layout forced into the corner is caught by the measurement, not just avoided.
-    layout = bust.layout_text("ARMOR UP", bust.attribution(None))
-    layout["top"] = 600
+    layout = bust.layout_text("ANGER COSTS MORE")
+    layout["top"] = 400
     with __import__("PIL.Image", fromlist=["Image"]).open(tmp / "corner.jpg") as im:
         bg = bust.place_bust(im.convert("RGB"), bust.ground_colour(im.convert("RGB")), 1)
-    final, masks, inks = bust.draw_text(bg, layout, bust.attribution(None))
+    final, masks, inks = bust.draw_text(bg, layout)
     res = bust.check(bg, final, masks, inks, layout, np.ones((720, 1280), dtype=bool))
     check(any("corner" in p for p in res["problems"]), "type pushed into the corner fails")
 
@@ -359,8 +399,8 @@ def test_the_stage_uses_the_bust_and_falls_back(tmp):
 if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
-        test_a_philosopher_is_named_only_when_the_script_leans_on_him()
-        test_the_headline_rules()
+        test_the_bust_is_chosen_by_the_script_but_nobody_is_named()
+        test_the_words_come_from_phrase_py()
         test_a_bust_thumbnail_is_made_checked_and_costed(tmp)
         test_a_small_budget_buys_fewer_candidates(tmp)
         test_no_budget_means_no_bust_and_no_pollinations(tmp)

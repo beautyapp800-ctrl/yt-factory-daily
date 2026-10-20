@@ -659,17 +659,17 @@ def _bust(video_id, title, video, cfg):
     run() on to the older picture-and-two-lines thumbnail, which needs no new pictures."""
     from pipeline import bust_thumbnail
     out = output_dir(video_id)
-    promise = ""
+    outline = {}
     if (out / "outline.json").exists():
         try:
-            promise = json.loads((out / "outline.json").read_text(encoding="utf-8")) \
-                .get("promise") or ""
+            outline = json.loads((out / "outline.json").read_text(encoding="utf-8")) or {}
         except (ValueError, OSError):
-            promise = ""
+            outline = {}
+    lessons = [l.get("title", "") for l in (outline.get("lessons") or [])]
     try:
         details = bust_thumbnail.make(video_id, title, video.get("topic") or title,
                                       bust_thumbnail.video_text(video_id), out, cfg,
-                                      promise=promise)
+                                      promise=outline.get("promise") or "", lessons=lessons)
     except Exception as e:                                           # noqa: BLE001
         msg = f"the bust thumbnail could not be made ({e}); using the older thumbnail"
         log.warning(msg)

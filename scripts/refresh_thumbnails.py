@@ -46,9 +46,9 @@ from pipeline import bust_thumbnail
 log = get_logger("refresh")
 
 SAMPLES = OUTPUT_DIR / "_refresh"
-# Bumped when the look changes so that thumbnails made to an older one are done again. 2: the
-# bottom-right corner is kept clear of YouTube's duration stamp.
-LAYOUT = 2
+# Bumped (in pipeline/bust_thumbnail.py) when the look changes, so that thumbnails made to an
+# older one are done again.
+LAYOUT = bust_thumbnail.LAYOUT
 
 
 def _when(value):
@@ -60,9 +60,11 @@ def _when(value):
 
 
 def made_by_pipeline(video_id):
+    """Whether the daily run itself already gave this video a bust at the current layout."""
     with db._connect() as conn:
         row = conn.execute("SELECT 1 FROM events WHERE video_id = ? AND stage = 'thumbnail' "
-                           "AND message LIKE 'bust:%' LIMIT 1", (video_id,)).fetchone()
+                           "AND message LIKE 'bust:%' AND message LIKE ? LIMIT 1",
+                           (video_id, f"%[layout {LAYOUT}]%")).fetchone()
     return row is not None
 
 
@@ -202,7 +204,6 @@ def main():
         ledger["done"][str(vid)] = {"at": stamp, "youtube_id": row["youtube_id"],
                                     "kind": kind, "layout": LAYOUT,
                                     "headline": details["headline"],
-                                    "attribution": details["attribution"],
                                     "passed": details["passed"],
                                     "neurons": details["neurons"]}
         ledger["set_log"].append({"at": stamp, "video_id": vid, "kind": kind})

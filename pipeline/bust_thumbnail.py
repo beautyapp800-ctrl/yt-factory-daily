@@ -1,18 +1,20 @@
-"""The channel's thumbnail: a marble bust on the left, two or three words on the right.
+"""The channel's thumbnail: a marble bust on the left, a phrase stacked on the right.
 
-The look, fixed by the owner and followed exactly:
+The look is the one that works in this niche (Stoic Journal, Stoic Orbit), fixed by the owner:
 
-- left, about 45% of the width: a close-up marble bust of a Stoic philosopher - classical
-  Greco-Roman sculpture, dramatic side light, real marble texture, the gaze a little aside;
-- behind it a dark grey ground with a little smoke or mist, never pure black;
+- an almost black ground;
+- left, about half the frame: a marble bust or antique statue, hard dramatic side light, real
+  marble texture - no hands, no living face, no lettering of its own;
+- right: the phrase from pipeline/phrase.py, three or four words, one to a line, in large
+  heavy condensed capitals, the lines alternating yellow and white; a thin red rule under them;
+  and at the bottom, small, the word STOICISM. All of it drawn by code, never by the model;
 - the bottom-right corner, 25% of the width by 20% of the height, is left empty: YouTube
-  draws the duration stamp there and it covered the yellow line once. The type is moved up
-  until it clears the corner, and the check below measures that on the drawn pixels;
-- right: two or three words, large, bold, white - what the video is about, e.g. SELF
-  DISCIPLINE - and under them in yellow "- MARCUS AURELIUS", "- SENECA" or "- EPICTETUS".
-  The words are drawn by code with a light shadow, never by the image model.
-- A philosopher is named only when the script really leans on him, counted in the narration
-  itself; otherwise the line says "- STOIC WISDOM". The bust is the philosopher named.
+  draws the duration stamp there. The type is moved up until it clears the corner, and the
+  check below measures that on the drawn pixels.
+
+No name goes under the phrase. The phrase is written by a language model, and signing it
+"- SENECA" would put invented words in a real man's mouth. The narration is still read for
+which philosopher it leans on, but only to choose whose likeness the bust has.
 
 How the bust is got. Cloudflare's flux-1-schnell, the same model the narration frames use,
 at more steps than they get, three or four candidates at a time. Gemini looks at the
@@ -22,8 +24,8 @@ measurements and OCR.
 
 How the result is checked. Every composed thumbnail is measured: the bust's mass sits in
 the left part of the frame and stays out of the type, every line of type is inside the frame
-and still readable at 336x189 (cap height and WCAG contrast against what is behind it), and
-the ground is not black. A thumbnail that fails is drawn again with fresh candidates, up to
+and still readable at 210x118, the size a phone feed shows (cap height and WCAG contrast
+against what is behind it), and the ground is close to black. A thumbnail that fails is drawn again with fresh candidates, up to
 three times; after that the best one made is used anyway, because a weaker thumbnail costs a
 little and a missing video costs the day.
 
@@ -48,17 +50,25 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont
 from core import db, images as image_api, neurons, ocr
 from core.llm import LLMError, complete_json, vision_json
 from core.logger import get_logger
+from pipeline import phrase as phrase_writer
 
 log = get_logger("bust")
 
+# Bumped when the look changes, so scripts/refresh_thumbnails.py redoes thumbnails made to an
+# older one. 2: the duration corner kept clear. 3: near-black, stacked yellow/white, red rule.
+LAYOUT = 3
+
 WIDTH, HEIGHT = 1280, 720
-CHECK_SIZE = (336, 189)
+CHECK_SIZE = (210, 118)
 JPEG_QUALITY = 90
 FONT_PATH = Path(__file__).resolve().parent.parent / "assets" / "fonts" / "Anton-Regular.ttf"
 
 WHITE = (255, 255, 255)
 YELLOW = (255, 204, 0)
-DASH = "–"
+RED = (214, 32, 39)
+LABEL_GREY = (196, 196, 196)
+LABEL = "STOICISM"
+LINE_COLOURS = (YELLOW, WHITE)          # alternating, top line first
 
 DEFAULTS = {
     "candidates": 4,
@@ -109,17 +119,13 @@ def mentions(text):
 
 
 def philosopher_for(text):
-    """(key or None, counts). None means the line reads STOIC WISDOM."""
+    """(key or None, counts). None means the bust is a generic Stoic, not a named man."""
     counts = mentions(text)
     ranked = sorted(counts.items(), key=lambda kv: -kv[1])
     (top, n), (_, runner_up) = ranked[0], ranked[1]
     if n >= MIN_MENTIONS and n >= DOMINANCE * runner_up:
         return top, counts
     return None, counts
-
-
-def attribution(key):
-    return f"{DASH} {(PHILOSOPHERS[key] if key else GENERIC)['label']}"
 
 
 def video_text(video_id):
@@ -132,79 +138,57 @@ def video_text(video_id):
 
 # --- the words ---------------------------------------------------------------
 
-MIN_WORDS, MAX_WORDS = 2, 3
-MAX_CHARS = 20
-MAX_WORD_CHARS = 11
+# One word to a line, three or four lines: the phrase is asked for in three or four words.
+MIN_WORDS, MAX_WORDS = 3, phrase_writer.MAX_WORDS
 _FUNCTION = {"a", "an", "the", "to", "of", "for", "and", "or", "in", "on", "with", "how",
              "why", "when", "while", "that", "this", "these", "from", "by", "at", "it", "is",
              "are", "be", "your", "you", "before", "after", "first", "every", "no", "one"}
 _EMPTY = {"stoic", "stoicism", "lessons", "lesson", "ways", "things", "rules", "tips",
-          "philosophy", "wisdom"}
-_PREFIX = re.compile(r"^\s*\d+\s+(stoic\s+)?(lessons|things|ways|rules|habits|truths)"
+          "philosophy", "wisdom", "habits", "habit"}
+_PREFIX = re.compile(r"^\s*\d+\s+(stoic\s+)?(\w+\s+)?(lessons|things|ways|rules|habits|truths)"
                      r"(\s+(to|that|for|from))?\s+", re.I)
-
-
-def headline_problems(text):
-    words = (text or "").split()
-    problems = []
-    if not MIN_WORDS <= len(words) <= MAX_WORDS:
-        problems.append(f"{len(words)} words, need {MIN_WORDS}-{MAX_WORDS}")
-    if any(not re.fullmatch(r"[A-Z][A-Z'\-]*", w) for w in words):
-        problems.append("only capital letters, no digits or punctuation")
-    if len(text or "") > MAX_CHARS:
-        problems.append(f"{len(text)} characters, at most {MAX_CHARS}")
-    if any(len(w) > MAX_WORD_CHARS for w in words):
-        problems.append(f"a word longer than {MAX_WORD_CHARS} letters")
-    if words and words[0].lower() in _FUNCTION:
-        problems.append(f"opens on '{words[0]}'")
-    if words and all(w.lower() in _EMPTY | _FUNCTION for w in words):
-        problems.append("says nothing the niche does not already say")
-    return problems
+FALLBACK_HEADLINE = "CONTROL WHAT MATTERS"
 
 
 def headline_from_title(title):
-    rest = _PREFIX.sub("", title or "")
-    words = [w.upper() for w in re.findall(r"[A-Za-z']+", rest)
-             if w.lower() not in _FUNCTION | _EMPTY and len(w) <= MAX_WORD_CHARS]
-    for n in (3, 2):
-        if len(words) >= n and len(" ".join(words[:n])) <= MAX_CHARS:
-            return " ".join(words[:n])
-    return "INNER PEACE"
+    """The title after its "10 Ways to" opening, when no phrase could be written - but only
+    whole: dropping its small words to make it fit turned "Strip Emotion From Criticism" into
+    STRIP EMOTION CRITICISM, which is not English. If the rest is not three or four words
+    that fit, a fixed line is used instead."""
+    words = [w.upper() for w in re.findall(r"[A-Za-z']+", _PREFIX.sub("", title or ""))]
+    if (MIN_WORDS <= len(words) <= MAX_WORDS and words[0].lower() not in _FUNCTION
+            and not all(w.lower() in _FUNCTION | _EMPTY for w in words)
+            and fits(" ".join(words))):
+        return " ".join(words)
+    return FALLBACK_HEADLINE
 
 
-HEADLINE_PROMPT = """Write the headline for a YouTube thumbnail of a Stoic philosophy video.
-
-Video title: {title}
-Topic: {topic}
-{promise}
-The headline is two or three words in capitals that name the core of the video, the way a
-book spine would: SELF DISCIPLINE, INNER PEACE, LET IT GO, FEAR NOTHING, CONTROL YOUR MIND,
-MASTER YOUR TIME. Plain words a viewer gets in half a second. Not a fragment of the title,
-not a question, no digits, no punctuation, at most {max_chars} characters in total, and
-do not use the words STOIC, STOICISM, LESSONS or WISDOM.
-{retry}
-Reply with JSON: {{"headline": "..."}}"""
+def fits(phrase):
+    """Whether this phrase can be set, one word to a line, at a size the feed can read."""
+    words = [w.upper() for w in phrase_writer._words(phrase)]
+    if not MIN_WORDS <= len(words) <= MAX_WORDS:
+        return False
+    try:
+        layout = layout_text(" ".join(words))
+    except RuntimeError:
+        return False
+    return cap_px(layout["size"]) >= MIN_HEAD_CAP_PX
 
 
-def headline_for(title, topic, promise=""):
-    """(headline, source). Source is "llm" or "title" when the model could not be used."""
-    complaint = ""
-    for _ in range(2):
-        try:
-            answer = complete_json(HEADLINE_PROMPT.format(
-                title=title, topic=topic or title, max_chars=MAX_CHARS,
-                promise=f"What the viewer gets: {promise}\n" if promise else "",
-                retry=f"\nYour last answer was refused: {complaint}.\n" if complaint else ""),
-                max_tokens=200, temperature=0.6)
-        except Exception as e:                                      # noqa: BLE001
-            log.warning("the headline could not be written: %s", e)
-            break
-        text = " ".join(str((answer or {}).get("headline", "")).upper().split())
-        problems = headline_problems(text)
-        if not problems:
-            return text, "llm"
-        complaint = f'"{text}": ' + "; ".join(problems)
-    return headline_from_title(title), "title"
+def headline_for(title, topic, promise="", lessons=()):
+    """(headline, source). Source is "phrase" when pipeline/phrase.py wrote it, "title" or
+    "fallback" when it could not and the words came from somewhere weaker."""
+    try:
+        phrase, complaints = phrase_writer.write_phrase(topic or title, promise, list(lessons),
+                                                        title, fits=fits, min_words=MIN_WORDS)
+    except Exception as e:                                          # noqa: BLE001
+        phrase, complaints = "", [f"the phrase could not be written: {e}"]
+    if phrase and not complaints:
+        return " ".join(w.upper() for w in phrase_writer._words(phrase)), "phrase"
+    log.warning("no usable phrase (%s); taking the words from the title",
+                "; ".join(complaints)[:200])
+    headline = headline_from_title(title)
+    return headline, "fallback" if headline == FALLBACK_HEADLINE else "title"
 
 
 # --- the bust ----------------------------------------------------------------
@@ -213,12 +197,12 @@ def bust_prompt(key):
     look = (PHILOSOPHERS[key] if key else GENERIC)["look"]
     return ("photorealistic close-up photograph of an ancient white marble bust of "
             f"{look}, classical Greco-Roman sculpture, head and shoulders filling most of the "
-            "frame, three-quarter view, head turned slightly to the right, eyes gazing off to "
-            "the side, dramatic side lighting from the left, deep sculpted shadows, highly "
-            "detailed realistic marble texture with subtle grey veins and weathering, the bust "
-            "centred slightly left, dark charcoal grey background with soft drifting smoke and "
-            "mist, museum photography, 85mm lens, sharp focus, no text, no letters, no "
-            "inscription, no plaque, no watermark")
+            "frame, three-quarter view, head turned slightly to the right, blank carved stone "
+            "eyes gazing off to the side, hard dramatic side lighting from the left, half of "
+            "the face in deep shadow, highly detailed realistic marble texture with subtle "
+            "grey veins and weathering, the bust centred slightly left, plain pure black "
+            "background, low-key museum photography, 85mm lens, sharp focus, no hands, no "
+            "arms, no text, no letters, no inscription, no plaque, no watermark")
 
 
 class _Drawer:
@@ -293,9 +277,9 @@ VISION_PROMPT = """You are choosing the background picture for a YouTube thumbna
 The {n} images follow in order; the first is index 0.
 
 The target: a photorealistic classical Greco-Roman WHITE MARBLE BUST of {who}, a close-up of
-head and shoulders, dramatic side light, realistic marble texture, the gaze slightly to the
-side, on a dark grey smoky background (not pure black), the bust in the centre or left of
-centre and not cut off at the top of the head.
+head and shoulders, hard dramatic side light, realistic marble texture, the gaze slightly to
+the side, on a plain near-black background, the bust in the centre or left of centre and not
+cut off at the top of the head, no hands or arms in the picture.
 
 For every image report:
 - "marble": 0-10, how convincingly it is real carved marble (not plastic, not a painting, not
@@ -386,7 +370,10 @@ BUST_CENTRE_X = 0.235          # of the width
 FADE_FROM, FADE_TO = 0.40, 0.53
 TEXT_LEFT = 0.515
 MARGIN = 56
-MIN_BG_LUM, MAX_BG_LUM = 34, 78
+# Almost black, not quite: a hint of the picture's own grey and a breath of drifting air keep
+# the ground from reading as a hole cut in the feed, and keep the JPEG's darks from banding.
+MIN_BG_LUM, MAX_BG_LUM = 6, 13
+SMOKE = 9                      # how bright the wisps in the ground get, of 255
 
 
 def _lum(arr):
@@ -394,7 +381,7 @@ def _lum(arr):
 
 
 def ground_colour(bust):
-    """A dark grey taken from the candidate's own background, kept out of black."""
+    """A near-black taken from the candidate's own background, mostly neutral."""
     arr = np.asarray(bust, dtype=np.float64)
     edge = np.concatenate([arr[:, -int(arr.shape[1] * 0.08):].reshape(-1, 3),
                            arr[:int(arr.shape[0] * 0.06)].reshape(-1, 3)])
@@ -422,9 +409,9 @@ def ground(colour, seed):
     y, x = np.mgrid[0:HEIGHT, 0:WIDTH].astype(np.float64)
     glow = np.exp(-(((x - WIDTH * 0.72) / (WIDTH * 0.45)) ** 2
                     + ((y - HEIGHT * 0.45) / (HEIGHT * 0.7)) ** 2))
-    shade = 0.90 + 0.22 * glow                          # a little lighter behind the type
+    shade = 0.85 + 0.25 * glow                          # barely lighter behind the type
     wisps = smoke(seed)
-    arr = colour[None, None, :] * shade[:, :, None] + 34 * wisps[:, :, None]
+    arr = colour[None, None, :] * shade[:, :, None] + SMOKE * wisps[:, :, None]
     return np.clip(arr, 0, 255)
 
 
@@ -433,7 +420,7 @@ def place_bust(bust, colour, seed):
     canvas = ground(colour, seed)
     square = np.asarray(bust.convert("RGB").resize((HEIGHT, HEIGHT), Image.LANCZOS),
                         dtype=np.float64)
-    floor = 0.55 * colour                               # lift the blacks: no pure black
+    floor = 0.55 * colour                               # the bust's blacks meet the ground's
     square = floor + square * (1 - floor / 255)
     left = round(WIDTH * BUST_CENTRE_X - HEIGHT / 2)
     x = np.arange(WIDTH, dtype=np.float64)
@@ -444,7 +431,7 @@ def place_bust(bust, colour, seed):
     a = alpha[lo:hi][None, :, None]
     canvas[:, lo:hi] = region * a + canvas[:, lo:hi] * (1 - a)
     wisps = smoke(seed + 1)[:, :, None]
-    canvas = canvas + 14 * wisps * (1 - 0.6 * alpha[None, :, None])   # one air over both
+    canvas = canvas + 0.5 * SMOKE * wisps * (1 - 0.6 * alpha[None, :, None])  # one air over both
     return Image.fromarray(np.clip(canvas, 0, 255).astype(np.uint8))
 
 
@@ -463,13 +450,19 @@ def _font(size):
     return ImageFont.truetype(str(FONT_PATH), size)
 
 
+def cap_px(size):
+    """Height of a capital at this size once the thumbnail is shrunk to CHECK_SIZE."""
+    box = _font(size).getbbox("H")
+    return (box[3] - box[1]) * CHECK_SIZE[1] / HEIGHT
+
+
 def line_options(words):
-    n = len(words)
-    options = [[" ".join(words)]]
-    for cut in range(1, n):
-        options.append([" ".join(words[:cut]), " ".join(words[cut:])])
-    if n == 3:
-        options.append(list(words))
+    """Ways to stack the phrase, one word to a line first. Four words may also go on three
+    lines with two neighbours sharing one, which sometimes sets larger."""
+    options = [list(words)]
+    if len(words) == 4:
+        for cut in range(3):
+            options.append(words[:cut] + [f"{words[cut]} {words[cut + 1]}"] + words[cut + 2:])
     return options
 
 
@@ -478,67 +471,91 @@ CORNER_W, CORNER_H = 0.25, 0.20
 CORNER = (round(WIDTH * (1 - CORNER_W)), round(HEIGHT * (1 - CORNER_H)), WIDTH, HEIGHT)
 CORNER_PAD = 10                  # clear air above and left of it, for the shadow
 
+LINE_GAP = 0.07                  # between lines, of the type size
+RULE_GAP = 0.13                  # from the last line to the red rule, of the type size
+RULE_PX = 6                      # thin: about a pixel at 210x118, a hairline under the block
+LABEL_SIZE = 34
+LABEL_TRACKING = 0.30            # extra space between the label's letters, of its size
+LABEL_AIR = 34                   # at least this much between the rule and the label
+
 
 def _intersects(a, b):
     return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
 
 
+def _label_layout(left):
+    """[(char, (x, y))] for the tracked-out STOICISM, and its ink box. It sits at the bottom
+    of the text column, left-aligned with the phrase, well clear of the duration corner."""
+    font = _font(LABEL_SIZE)
+    vertical = font.getbbox(LABEL)
+    y = HEIGHT - MARGIN - vertical[3]
+    chars, x = [], left - font.getbbox(LABEL[0])[0]
+    for ch in LABEL:
+        chars.append((ch, (x, y)))
+        x += font.getlength(ch) + round(LABEL_SIZE * LABEL_TRACKING)
+    last_x = chars[-1][1][0]
+    ink = (left, y + vertical[1], round(last_x + font.getbbox(LABEL[-1])[2]), y + vertical[3])
+    return chars, ink
+
+
 def _inks(layout, top):
-    """[(name, (x0, y0, x1, y1))] of each line of type with its block's top edge at `top`."""
+    """[(name, (x0, y0, x1, y1))] of every line, the rule and the label, with the phrase's
+    top edge at `top`."""
     out, y = [], top
-    for box in layout["boxes"]:
-        out.append(("head", (layout["left"], y, layout["left"] + box[2] - box[0],
-                             y + box[3] - box[1])))
+    for i, box in enumerate(layout["boxes"]):
+        out.append((f"line{i}", (layout["left"], y, layout["left"] + box[2] - box[0],
+                                 y + box[3] - box[1])))
         y += (box[3] - box[1]) + layout["gap"]
-    y += round(layout["size"] * 0.22) - layout["gap"]
-    abox = layout["abox"]
-    out.append(("attrib", (layout["left"], y, layout["left"] + abox[2] - abox[0],
-                           y + abox[3] - abox[1])))
+    y += layout["rule_gap"] - layout["gap"]
+    out.append(("rule", (layout["left"], y, layout["left"] + layout["rule_w"], y + RULE_PX)))
+    out.append(("label", layout["label_ink"]))
     return out
 
 
 def place(layout):
-    """The top edge for this block: as near the middle as it can be while every line stays
-    out of the corner. None if no position does."""
+    """The top edge for the phrase: centred in the room above the label, then moved up as far
+    as it takes for every line to clear the corner. None if no position does."""
     keep_out = (CORNER[0] - CORNER_PAD, CORNER[1] - CORNER_PAD, WIDTH, HEIGHT)
-    preferred = round((HEIGHT - layout["total"]) / 2 - HEIGHT * 0.02)
+    if _intersects(layout["label_ink"], keep_out):
+        return None
+    preferred = MARGIN + (layout["room"] - layout["total"]) // 2
     for top in range(preferred, MARGIN - 1, -2):
         if not any(_intersects(ink, keep_out) for _, ink in _inks(layout, top)):
             return top
     return None
 
 
-def layout_text(headline, attrib):
-    """The largest arrangement of the headline that fits the right-hand column and clears
-    the bottom-right corner."""
+def layout_text(headline):
+    """The largest stacking of the headline that fits the right-hand column above the label
+    and clears the bottom-right corner."""
     words = headline.split()
     left, right = round(WIDTH * TEXT_LEFT), WIDTH - MARGIN
     column = right - left
+    label_chars, label_ink = _label_layout(left)
+    room = label_ink[1] - LABEL_AIR - MARGIN
     best = None
     for lines in line_options(words):
-        for size in range(230, 60, -4):
+        for size in range(260, 60, -4):
             font = _font(size)
             boxes = [font.getbbox(line) for line in lines]
             widths = [b[2] - b[0] for b in boxes]
             if max(widths) > column:
                 continue
-            gap = round(size * 0.10)
+            gap = round(size * LINE_GAP)
             head_h = sum(b[3] - b[1] for b in boxes) + gap * (len(lines) - 1)
-            small = max(40, round(size * 0.34))
-            while small > 30 and _font(small).getbbox(attrib)[2] > column:
-                small -= 2
-            abox = _font(small).getbbox(attrib)
-            total = head_h + round(size * 0.22) + (abox[3] - abox[1])
-            if total > HEIGHT - 2 * MARGIN - 40:
+            rule_gap = round(size * RULE_GAP)
+            total = head_h + rule_gap + RULE_PX
+            if total > room:
                 continue
-            candidate = {"lines": lines, "size": size, "small": small, "gap": gap,
-                         "head_h": head_h, "total": total, "boxes": boxes, "abox": abox,
-                         "left": left}
+            candidate = {"lines": lines, "size": size, "gap": gap, "head_h": head_h,
+                         "rule_gap": rule_gap, "rule_w": max(widths), "total": total,
+                         "room": room, "boxes": boxes, "left": left,
+                         "label_chars": label_chars, "label_ink": label_ink}
             candidate["top"] = place(candidate)
             if candidate["top"] is None:
                 continue                      # too big to keep out of the corner: try smaller
-            # Bigger type wins; at the same size, fewer lines.
-            if best is None or (size, -len(lines)) > (best["size"], -len(best["lines"])):
+            # Bigger type wins; at the same size, one word to a line.
+            if best is None or (size, len(lines)) > (best["size"], len(best["lines"])):
                 best = candidate
             break
     if best is None:
@@ -546,26 +563,29 @@ def layout_text(headline, attrib):
     return best
 
 
-def draw_text(img, layout, attrib):
-    """Draw the type with a soft shadow. Returns (image, {name: mask}, [ink boxes])."""
-    top = layout["top"]
-    items, y = [], top
-    for line, box in zip(layout["lines"], layout["boxes"]):
-        items.append(("head", line, layout["size"], WHITE, (layout["left"] - box[0], y - box[1])))
-        y += (box[3] - box[1]) + layout["gap"]
-    y += round(layout["size"] * 0.22) - layout["gap"]
-    abox = layout["abox"]
-    items.append(("attrib", attrib, layout["small"], YELLOW,
-                  (layout["left"] - abox[0], y - abox[1])))
+def draw_text(img, layout):
+    """Draw the phrase, the rule and the label. Returns (image, {name: mask}, [ink boxes])."""
+    inks = dict(_inks(layout, layout["top"]))
+    items = []
+    for i, (line, box) in enumerate(zip(layout["lines"], layout["boxes"])):
+        x0, y0 = inks[f"line{i}"][:2]
+        items.append((f"line{i}", line, LINE_COLOURS[i % len(LINE_COLOURS)],
+                      (x0 - box[0], y0 - box[1])))
 
-    masks = {"head": Image.new("L", img.size, 0), "attrib": Image.new("L", img.size, 0)}
-    inks = []
-    for name, text, size, _, at in items:
-        ImageDraw.Draw(masks[name]).text(at, text, font=_font(size), fill=255)
-        bb = _font(size).getbbox(text)
-        inks.append((at[0] + bb[0], at[1] + bb[1], at[0] + bb[2], at[1] + bb[3]))
-    shadow_src = Image.fromarray(np.maximum(np.asarray(masks["head"]),
-                                            np.asarray(masks["attrib"])))
+    masks = {}
+    for name, text, _, at in items:
+        masks[name] = Image.new("L", img.size, 0)
+        ImageDraw.Draw(masks[name]).text(at, text, font=_font(layout["size"]), fill=255)
+    masks["rule"] = Image.new("L", img.size, 0)
+    ImageDraw.Draw(masks["rule"]).rectangle(inks["rule"], fill=255)
+    masks["label"] = Image.new("L", img.size, 0)
+    label_font = _font(LABEL_SIZE)
+    for ch, at in layout["label_chars"]:
+        ImageDraw.Draw(masks["label"]).text(at, ch, font=label_font, fill=255)
+
+    # A soft shadow under the phrase only: it is what keeps a line legible where the edge of
+    # the bust's light reaches into the column.
+    shadow_src = Image.fromarray(np.max([np.asarray(masks[n]) for n, *_ in items], axis=0))
     shadow = Image.new("L", img.size, 0)
     shadow.paste(shadow_src, (5, 6))
     shadow = shadow.filter(ImageFilter.GaussianBlur(7))
@@ -573,9 +593,12 @@ def draw_text(img, layout, attrib):
     arr = arr * (1 - 0.60 * np.asarray(shadow, dtype=np.float64)[:, :, None] / 255)
     out = Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
     draw = ImageDraw.Draw(out)
-    for _, text, size, colour, at in items:
-        draw.text(at, text, font=_font(size), fill=colour)
-    return out, masks, inks
+    for _, text, colour, at in items:
+        draw.text(at, text, font=_font(layout["size"]), fill=colour)
+    draw.rectangle(inks["rule"], fill=RED)
+    for ch, at in layout["label_chars"]:
+        draw.text(at, ch, font=label_font, fill=LABEL_GREY)
+    return out, masks, list(inks.values())
 
 
 def _rel_lum(v):
@@ -592,12 +615,9 @@ def _contrast(colour, backdrop_small, mask_small):
     return (max(text, behind) + 0.05) / (min(text, behind) + 0.05)
 
 
-MIN_HEAD_CAP_PX = 14            # at 336x189
-MIN_ATTRIB_CAP_PX = 7
+MIN_HEAD_CAP_PX = 9             # a capital of the phrase, at 210x118
 MIN_CONTRAST = 4.5
-MAX_BLACK_SHARE = 0.02          # of pixels darker than BLACK_LUM
-BLACK_LUM = 16
-MIN_GROUND_LUM = 28
+MAX_GROUND_LUM = 24             # median of the ground behind the type: almost black
 BUST_MAX_CENTROID = 0.42        # of the width
 BUST_MIN_LEFT_SHARE = 0.85      # of the bust's mass left of the type column
 BUST_MIN_AREA = 0.12            # of the left 45%: a close-up, not a figurine
@@ -628,7 +648,7 @@ def check(backdrop, final, masks, inks, layout, subject):
 
     corner = np.zeros((HEIGHT, WIDTH), dtype=bool)
     corner[CORNER[1]:, CORNER[0]:] = True
-    drawn = (np.asarray(masks["head"]) > 20) | (np.asarray(masks["attrib"]) > 20)
+    drawn = np.max([np.asarray(m) for m in masks.values()], axis=0) > 20
     if (drawn & corner).any():
         problems.append("type reaches the bottom-right corner, where YouTube puts the duration")
     for _, ink in _inks(layout, layout["top"]):
@@ -636,47 +656,38 @@ def check(backdrop, final, masks, inks, layout, subject):
             problems.append("type is within a few pixels of the bottom-right corner")
             break
 
-    scale = CHECK_SIZE[1] / HEIGHT
-    head_cap = (_font(layout["size"]).getbbox("H")[3] - _font(layout["size"]).getbbox("H")[1]) \
-        * scale
-    attrib_cap = (_font(layout["small"]).getbbox("H")[3]
-                  - _font(layout["small"]).getbbox("H")[1]) * scale
+    head_cap = cap_px(layout["size"])
     if head_cap < MIN_HEAD_CAP_PX:
-        problems.append(f"headline capitals are {head_cap:.1f}px at 336x189")
-    if attrib_cap < MIN_ATTRIB_CAP_PX:
-        problems.append(f"name capitals are {attrib_cap:.1f}px at 336x189")
-    small_back = np.asarray(backdrop.convert("RGB").resize(CHECK_SIZE, Image.LANCZOS),
-                            dtype=np.float64)
-    small_back = _lum(small_back)
-    ratios = {name: _contrast(colour, small_back,
-                              np.asarray(masks[name].resize(CHECK_SIZE, Image.LANCZOS)))
-              for name, colour in (("head", WHITE), ("attrib", YELLOW))}
-    for name, ratio in ratios.items():
-        if ratio < MIN_CONTRAST:
-            problems.append(f"{name} contrast {ratio:.1f}:1 at 336x189")
+        problems.append(f"phrase capitals are {head_cap:.1f}px at 210x118")
+    small_back = _lum(np.asarray(backdrop.convert("RGB").resize(CHECK_SIZE, Image.LANCZOS),
+                                 dtype=np.float64))
+    ratios = {}
+    for i in range(len(layout["lines"])):
+        name = f"line{i}"
+        ratios[name] = _contrast(LINE_COLOURS[i % len(LINE_COLOURS)], small_back,
+                                 np.asarray(masks[name].resize(CHECK_SIZE, Image.LANCZOS)))
+        if ratios[name] < MIN_CONTRAST:
+            problems.append(f"line {i + 1} contrast {ratios[name]:.1f}:1 at 210x118")
 
     lum = _lum(np.asarray(backdrop.convert("RGB"), dtype=np.float64))
-    black = float((lum < BLACK_LUM).mean())
     ground_lum = float(np.median(lum[:, round(WIDTH * TEXT_LEFT):]))
-    if black > MAX_BLACK_SHARE:
-        problems.append(f"{black:.0%} of the frame is black")
-    if ground_lum < MIN_GROUND_LUM:
-        problems.append(f"the ground is too dark ({ground_lum:.0f})")
+    if ground_lum > MAX_GROUND_LUM:
+        problems.append(f"the ground is not dark enough ({ground_lum:.0f})")
     return {"ok": not problems, "problems": problems, "bust_centroid": round(centroid, 3),
             "bust_left_share": round(share, 3), "bust_area": round(area, 3),
-            "head_cap_px": round(head_cap, 1), "attrib_cap_px": round(attrib_cap, 1),
-            "contrast_head": round(ratios["head"], 1),
-            "contrast_attrib": round(ratios["attrib"], 1),
-            "black_share": round(black, 4), "ground_lum": round(ground_lum, 1)}
+            "head_cap_px": round(head_cap, 1), "lines": len(layout["lines"]),
+            "type_size": layout["size"],
+            "contrast_min": round(min(ratios.values()), 1) if ratios else 0.0,
+            "ground_lum": round(ground_lum, 1)}
 
 
-def compose(bust_path, headline, attrib, seed):
+def compose(bust_path, headline, seed):
     with Image.open(bust_path) as img:
         bust = img.convert("RGB")
     colour = ground_colour(bust)
     backdrop = place_bust(bust, colour, seed)
-    layout = layout_text(headline, attrib)
-    final, masks, inks = draw_text(backdrop, layout, attrib)
+    layout = layout_text(headline)
+    final, masks, inks = draw_text(backdrop, layout)
     result = check(backdrop, final, masks, inks, layout, subject_mask(bust, colour))
     return final, result
 
@@ -687,7 +698,7 @@ def settings(cfg):
     return {**DEFAULTS, **((cfg or {}).get("thumbnail") or {})}
 
 
-def make(video_id, title, topic, text, out_dir, cfg, promise="", budget=None):
+def make(video_id, title, topic, text, out_dir, cfg, promise="", budget=None, lessons=()):
     """Build out_dir/thumbnail.jpg. Returns a details dict, "neurons" among them.
 
     Raises RuntimeError only when no bust at all could be drawn; the caller falls back.
@@ -700,12 +711,11 @@ def make(video_id, title, topic, text, out_dir, cfg, promise="", budget=None):
         budget = neurons.available(s["reserve_neurons"])
 
     key, counts = philosopher_for(text)
-    attrib = attribution(key)
-    headline, headline_source = headline_for(title, topic, promise)
+    headline, headline_source = headline_for(title, topic, promise, lessons)
     prompt = bust_prompt(key)
     drawer = _Drawer(cfg, s, budget, work)
-    log.info("thumbnail: %r %s (mentions %s), %.0f neurons free", headline, attrib, counts,
-             budget)
+    log.info("thumbnail: %r from %s, bust of %s (mentions %s), %.0f neurons free", headline,
+             headline_source, key or "a generic Stoic", counts, budget)
 
     best, tries = None, []
     for attempt in range(1, s["attempts"] + 1):
@@ -720,7 +730,7 @@ def make(video_id, title, topic, text, out_dir, cfg, promise="", budget=None):
         for rank, (path, score, acceptable, notes) in enumerate(ranked):
             if not acceptable and rank > 0:
                 continue                       # the top one is composed even if flawed
-            final, result = compose(path, headline, attrib, int(video_id) * 7 + attempt)
+            final, result = compose(path, headline, int(video_id) * 7 + attempt)
             entry = {"attempt": attempt, "source": Path(path).name,
                      "provider": provider[path], "vision_ok": acceptable,
                      "vision": notes, "judged_by": judged_by, **result}
@@ -743,8 +753,8 @@ def make(video_id, title, topic, text, out_dir, cfg, promise="", budget=None):
     final.save(path, "JPEG", quality=JPEG_QUALITY)
     small = out_dir / "thumb_small.jpg"
     final.resize(CHECK_SIZE, Image.LANCZOS).save(small, "JPEG", quality=JPEG_QUALITY)
-    details = {"style": "bust", "headline": headline, "headline_source": headline_source,
-               "attribution": attrib, "philosopher": key, "mentions": counts,
+    details = {"style": "bust", "layout": LAYOUT, "headline": headline,
+               "headline_source": headline_source, "philosopher": key, "mentions": counts,
                "passed": bool(best[0][0]), "chosen": chosen, "tries": tries,
                "neurons": round(drawer.spent), "cloudflare_calls": drawer.cf_calls,
                "neurons_per_image": drawer.per_image, "steps": drawer.steps,
@@ -757,8 +767,9 @@ def make(video_id, title, topic, text, out_dir, cfg, promise="", budget=None):
 def summary(details):
     """One line for the events table. Carries "<n> neurons" so core.neurons counts it."""
     c = details["chosen"]
-    return (f"bust: {details['headline']} / {details['attribution']} "
-            f"({details['philosopher'] or 'no philosopher dominates'}), "
+    return (f"bust: {details['headline']} [layout {details['layout']}] "
+            f"(words from {details['headline_source']}, "
+            f"bust of {details['philosopher'] or 'a generic Stoic'}), "
             f"{c['source']} from {c['provider']}, attempt {c['attempt']}, "
             f"{'all checks passed' if details['passed'] else 'BEST AVAILABLE: ' + '; '.join(c['problems'] or [c['vision']])}, "
             f"{details['neurons']} neurons over {details['cloudflare_calls']} Cloudflare calls "
