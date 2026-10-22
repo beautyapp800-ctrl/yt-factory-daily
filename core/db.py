@@ -5,7 +5,7 @@ from pathlib import Path
 
 DB_PATH = Path(__file__).resolve().parent.parent / "data" / "factory.db"
 
-STATUSES = ("pending", "scripting", "tts", "images", "rendering",
+STATUSES = ("pending", "scripting", "tts", "bust", "images", "rendering",
             "seo", "thumbnail", "upload", "ready", "uploading", "published", "failed")
 
 SCHEMA = """

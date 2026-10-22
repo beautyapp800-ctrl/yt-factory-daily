@@ -763,6 +763,103 @@ def make(video_id, title, topic, text, out_dir, cfg, promise="", budget=None, le
     return details
 
 
+# --- the pipeline's two halves -------------------------------------------------------
+#
+# The daily run draws the bust FIRST, before the frames: it is cheap (one image) and nothing
+# can stand in for it, while the frames can wait a day. So the drawing is its own stage, run
+# right after the narration, and the type is set on it at the end, once the final title is
+# known. Between the two the picture lives in out_dir/bust/, which the workflow caches with
+# the frames, so a video whose frames are deferred keeps the bust it already paid for.
+
+CHOSEN = "chosen.json"
+
+
+def draw(video_id, text, out_dir, cfg):
+    """Draw and judge this video's bust candidates; keep them for finish().
+
+    Returns the record written to out_dir/bust/chosen.json. Cloudflare is asked directly,
+    for as many candidates as config allows: its refusal costs nothing and is the only
+    reliable word on what is left - this project's own estimate kept the bust of video 28
+    from being asked for at all. Raises core.concede.Deferred when nothing could be drawn.
+    """
+    from core.concede import Deferred
+    s = settings(cfg)
+    work = Path(out_dir) / "bust"
+    work.mkdir(parents=True, exist_ok=True)
+    existing = chosen_record(out_dir)
+    if existing:
+        log.info("bust already drawn for video %s: %s", video_id, existing["ranked"][0]["path"])
+        return existing
+
+    key, counts = philosopher_for(text)
+    drawer = _Drawer(cfg, s, s["candidates"] * neurons_per_image(s["steps"]) + 1, work)
+    drawn = drawer.draw(bust_prompt(key), s["candidates"])
+    if not drawn:
+        raise Deferred("no bust could be drawn (Cloudflare refused or failed); the video waits "
+                       "for the next run rather than go out with a substitute thumbnail")
+    ranked, judged_by = rank_candidates(
+        [p for p, _ in drawn], key,
+        [s["vision_model"], ((cfg or {}).get("llm") or {}).get("gemini_model")])
+    record = {"philosopher": key, "mentions": counts, "judged_by": judged_by,
+              "neurons": round(drawer.spent), "cloudflare_calls": drawer.cf_calls,
+              "steps": drawer.steps,
+              "ranked": [{"path": p, "score": sc, "acceptable": ok, "notes": notes}
+                         for p, sc, ok, notes in ranked]}
+    (work / CHOSEN).write_text(json.dumps(record, indent=2), encoding="utf-8")
+    return record
+
+
+def chosen_record(out_dir):
+    """The record draw() left, or None if there is none or its pictures are gone."""
+    path = Path(out_dir) / "bust" / CHOSEN
+    if not path.exists():
+        return None
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["ranked"] = [r for r in record.get("ranked", []) if Path(r["path"]).exists()]
+    return record if record["ranked"] else None
+
+
+def finish(video_id, title, topic, out_dir, cfg, promise="", lessons=()):
+    """Set the phrase on the bust draw() kept and write thumbnail.jpg. Spends nothing.
+
+    Raises RuntimeError when there is no drawn bust to finish; the caller defers.
+    """
+    record = chosen_record(out_dir)
+    if not record:
+        raise RuntimeError("no drawn bust on disk to set the phrase on")
+    out_dir = Path(out_dir)
+    headline, headline_source = headline_for(title, topic, promise, lessons)
+    best, tries = None, []
+    for rank, cand in enumerate(record["ranked"]):
+        if not cand["acceptable"] and rank > 0:
+            continue                           # the top one is composed even if flawed
+        final, result = compose(cand["path"], headline, int(video_id) * 7 + 1)
+        entry = {"attempt": 1, "source": Path(cand["path"]).name, "provider": "cloudflare",
+                 "vision_ok": cand["acceptable"], "vision": cand["notes"],
+                 "judged_by": record["judged_by"], **result}
+        tries.append(entry)
+        quality = (result["ok"] and cand["acceptable"], cand["acceptable"], result["ok"],
+                   cand["score"])
+        if best is None or quality > best[0]:
+            best = (quality, final, entry)
+        if quality[0]:
+            break
+    _, final, chosen = best
+    path = out_dir / "thumbnail.jpg"
+    final.save(path, "JPEG", quality=JPEG_QUALITY)
+    small = out_dir / "thumb_small.jpg"
+    final.resize(CHECK_SIZE, Image.LANCZOS).save(small, "JPEG", quality=JPEG_QUALITY)
+    details = {"style": "bust", "layout": LAYOUT, "headline": headline,
+               "headline_source": headline_source, "philosopher": record["philosopher"],
+               "mentions": record["mentions"], "passed": bool(best[0][0]), "chosen": chosen,
+               "tries": tries, "neurons": 0, "drawn_neurons": record["neurons"],
+               "cloudflare_calls": 0, "steps": record["steps"],
+               "path": str(path), "small": str(small)}
+    (out_dir / "thumbnail.json").write_text(json.dumps(details, indent=2, default=str),
+                                            encoding="utf-8")
+    return details
+
+
 def summary(details):
     """One line for the events table. Carries "<n> neurons" so core.neurons counts it."""
     c = details["chosen"]

@@ -129,6 +129,7 @@ jobs:
         with:
           path: |
             output/${{ steps.state.outputs.video_id }}/images
+            output/${{ steps.state.outputs.video_id }}/bust
             output/${{ steps.state.outputs.video_id }}/voice.mp3
             output/${{ steps.state.outputs.video_id }}/timings.json
             output/${{ steps.state.outputs.video_id }}/script.txt
@@ -150,6 +151,7 @@ jobs:
         with:
           path: |
             output/${{ steps.state.outputs.video_id }}/images
+            output/${{ steps.state.outputs.video_id }}/bust
             output/${{ steps.state.outputs.video_id }}/voice.mp3
             output/${{ steps.state.outputs.video_id }}/timings.json
             output/${{ steps.state.outputs.video_id }}/script.txt

@@ -8,7 +8,7 @@ from core import db
 from core.concede import Deferred, concede
 from core.config import ConfigError, load_config
 from core.logger import get_logger
-from pipeline import images, render, script, seo, thumbnail, topic, tts, upload
+from pipeline import bust, images, render, script, seo, thumbnail, topic, tts, upload
 
 log = get_logger("run")
 
@@ -17,6 +17,9 @@ STAGES = [
     ("topic", topic, "pending"),
     ("script", script, "scripting"),
     ("tts", tts, "tts"),
+    # The bust before the frames: one image, cheap, and nothing may replace it, while the
+    # frames can defer to tomorrow. Drawn second, it lost to them on 22 October.
+    ("bust", bust, "bust"),
     ("images", images, "images"),
     ("render", render, "rendering"),
     # seo before thumbnail: the thumbnail's words are taken from the final YouTube title,

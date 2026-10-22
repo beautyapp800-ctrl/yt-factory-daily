@@ -339,58 +339,75 @@ def test_a_video_without_a_bust_is_done_first_and_old_layouts_again(tmp):
           [v["id"] for v in urgent + old], "a public one is later, and a current one is left alone")
 
 
-def test_the_stage_uses_the_bust_and_falls_back(tmp):
+def _events(stage):
+    import sqlite3
+    from contextlib import closing
+    with closing(sqlite3.connect(db.DB_PATH)) as conn:
+        return [r[0] for r in conn.execute("SELECT message FROM events WHERE stage=?", (stage,))]
+
+
+def test_the_bust_is_drawn_before_the_frames_and_finished_after(tmp):
+    import run as runner
+    import pipeline.bust as bust_stage
+    names = [n for n, _, _ in runner.STAGES]
+    check(names.index("bust") < names.index("images") < names.index("thumbnail"),
+          f"the bust is drawn before the frames, the type set after the title ({names})")
+
     db.DB_PATH = tmp / "stage.db"
     db.init_db()
     config.OUTPUT_DIR = tmp / "out"
     vid = db.create_video("discipline")
     db.update_video(vid, seo_title="10 Stoic Lessons on Discipline")
-    _stub()
+    calls = _stub()
     real_available = neurons.available
-    neurons.available = lambda *a, **k: 1500
+    neurons.available = lambda *a, **k: 0          # the estimate is not asked any more
     try:
-        check(thumb.run(vid, CFG), "the stage succeeds")
+        check(bust_stage.run(vid, CFG), "the bust stage succeeds")
+        drawn = len(calls)
+        check(drawn == CFG["thumbnail"]["candidates"],
+              f"Cloudflare is asked even when the estimate says nothing is free ({drawn})")
+        check(bust_stage.run(vid, CFG) and len(calls) == drawn,
+              "a second run of the stage does not pay for the bust again")
+        bust.image_api.synthesize_cloudflare = _forbidden
+        check(thumb.run(vid, CFG), "the thumbnail stage sets the type on the kept bust")
     finally:
         neurons.available = real_available
         _restore()
+    check(any("neurons over" in m for m in _events("bust")),
+          "the bust stage's spend is on the record")
+    check(any(m.startswith("bust:") for m in _events("thumbnail")),
+          "the thumbnail event says bust")
     video = db.get_video(vid)
     check(video["thumbnail_path"].endswith("thumbnail.jpg"), "the bust thumbnail is recorded")
-    import sqlite3
-    from contextlib import closing
-    with closing(sqlite3.connect(db.DB_PATH)) as conn:
-        msgs = [r[0] for r in conn.execute("SELECT message FROM events WHERE stage='thumbnail'")]
-    check(any(m.startswith("bust:") and "neurons" in m for m in msgs),
-          "the event says bust and carries the spend")
 
-    # Now the bust cannot be made at all: the older thumbnail is built from the narration
-    # frames, and no covers are bought.
-    def boom(*a, **k):
-        raise RuntimeError("no bust could be drawn")
-    real_make = bust.make
-    bust.make = boom
-    seen = {}
 
-    def classic(candidates, title, out_dir, **k):
-        seen["candidates"] = candidates
-        return {"path": Path(out_dir) / "thumbnail.jpg", "small": None, "first": ["A"],
-                "second": ["B"], "source": "x.jpg", "font_size": 1, "small_font_size": 1,
-                "block_height": 1, "block_width": 1, "block_fraction": 0.4, "accent": "a",
-                "accent_rgb": [1, 1, 1], "layouts_tried": 1, "word_options": 1,
-                "readability": {"ok": True, "cap_px": 9, "contrast_first": 5,
-                                "contrast_second": 5, "ocr_share": None},
-                "contrast": 1, "rim": 1, "left": 1, "detail": 1, "rank": 1, "candidates": 1,
-                "rejected_for_text": [], "focus": True}
-    real_classic, real_phrase = thumb.make_thumbnail, thumb._phrase_for
-    real_draw = thumb.cover_image.draw
-    thumb.make_thumbnail = classic
-    thumb._phrase_for = lambda *a: ([(["A"], ["B"])], "A B", "")
+def test_no_bust_means_the_video_waits_not_a_substitute(tmp):
+    from core.concede import Deferred
+    import pipeline.bust as bust_stage
+    db.DB_PATH = tmp / "wait.db"
+    db.init_db()
+    config.OUTPUT_DIR = tmp / "out_wait"
+    vid = db.create_video("anger")
+    db.update_video(vid, seo_title="10 Ways to Win Arguments Through Silence")
+    _stub(cf_error=lambda steps: "cloudflare HTTP 429: you have used up your daily free "
+                                 "allocation of 10,000 neurons")
+    used = {}
+    real_classic = thumb.make_thumbnail
+    thumb.make_thumbnail = lambda *a, **k: used.setdefault("classic", True)
     thumb.cover_image.draw = _forbidden
     try:
-        check(thumb.run(vid, CFG), "the stage still succeeds when the bust fails")
+        for name, stage in (("bust", bust_stage), ("thumbnail", thumb)):
+            try:
+                stage.run(vid, CFG)
+                got = None
+            except Deferred as e:
+                got = e
+            check(got is not None, f"the {name} stage defers when no bust can be drawn ({got})")
     finally:
-        bust.make, thumb.make_thumbnail, thumb._phrase_for = real_make, real_classic, real_phrase
-        thumb.cover_image.draw = real_draw
-    check("candidates" in seen, "and the older thumbnail was made, without buying covers")
+        thumb.make_thumbnail = real_classic
+        _restore()
+    check("classic" not in used, "and the frame-cut thumbnail is never made in its place")
+    check(not db.get_video(vid).get("thumbnail_path"), "nothing is recorded as the thumbnail")
 
 
 if __name__ == "__main__":
@@ -407,5 +424,6 @@ if __name__ == "__main__":
         test_neurons_count_a_rolling_day_and_hold_frames_back(tmp)
         test_the_corner_stays_empty_and_the_check_says_so(tmp)
         test_a_video_without_a_bust_is_done_first_and_old_layouts_again(tmp)
-        test_the_stage_uses_the_bust_and_falls_back(tmp)
+        test_the_bust_is_drawn_before_the_frames_and_finished_after(tmp)
+        test_no_bust_means_the_video_waits_not_a_substitute(tmp)
     print("ALL BUST THUMBNAIL TESTS PASSED")

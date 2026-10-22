@@ -38,7 +38,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageEnhance, ImageFont
 
 from core import db, ocr
-from core.concede import concede
+from core.concede import Deferred, concede
 from core.config import output_dir
 from pipeline import cover_image, phrase as phrase_writer
 from core.logger import get_logger
@@ -655,8 +655,10 @@ def _phrase_for(video_id, title, cfg):
 
 
 def _bust(video_id, title, video, cfg):
-    """The bust thumbnail (pipeline/bust_thumbnail.py). True when it was made; False sends
-    run() on to the older picture-and-two-lines thumbnail, which needs no new pictures."""
+    """The bust thumbnail (pipeline/bust_thumbnail.py): the phrase set on the bust that the
+    bust stage drew before the frames. If that picture is gone it is drawn now. Nothing stands
+    in for it - not a narration frame, not YouTube's own pick - so any failure here defers the
+    video to the next run instead of letting it go out without its thumbnail."""
     from pipeline import bust_thumbnail
     out = output_dir(video_id)
     outline = {}
@@ -667,14 +669,16 @@ def _bust(video_id, title, video, cfg):
             outline = {}
     lessons = [l.get("title", "") for l in (outline.get("lessons") or [])]
     try:
-        details = bust_thumbnail.make(video_id, title, video.get("topic") or title,
-                                      bust_thumbnail.video_text(video_id), out, cfg,
-                                      promise=outline.get("promise") or "", lessons=lessons)
+        if not bust_thumbnail.chosen_record(out):
+            log.warning("no bust kept from the bust stage; drawing it now")
+            bust_thumbnail.draw(video_id, bust_thumbnail.video_text(video_id), out, cfg)
+        details = bust_thumbnail.finish(video_id, title, video.get("topic") or title, out, cfg,
+                                        promise=outline.get("promise") or "", lessons=lessons)
+    except Deferred:
+        raise
     except Exception as e:                                           # noqa: BLE001
-        msg = f"the bust thumbnail could not be made ({e}); using the older thumbnail"
-        log.warning(msg)
-        db.log_event(video_id, "thumbnail", "warning", msg)
-        return False
+        raise Deferred(f"the bust thumbnail could not be made ({e}); the video waits for the "
+                       f"next run") from e
     line = bust_thumbnail.summary(details)
     log.info(line)
     db.log_event(video_id, "thumbnail", "info" if details["passed"] else "warning", line)
@@ -693,10 +697,9 @@ def run(video_id, cfg):
 
     style = ((cfg or {}).get("thumbnail") or {}).get("style")
     if style == "bust":
-        if _bust(video_id, title, video, cfg):
-            return True
-        # The bust spent whatever Neurons there were; the fallback does not draw covers.
-        cfg = {**cfg, "thumbnail": {**cfg["thumbnail"], "covers": False}}
+        # No fallback: the picture-and-two-lines thumbnail below is a style of its own, chosen
+        # in config, and never stands in for a bust that could not be made.
+        return _bust(video_id, title, video, cfg)
 
     accent_name, accent = accent_for(video_id)
     options, phrase, fallback_note = _phrase_for(video_id, title, cfg)

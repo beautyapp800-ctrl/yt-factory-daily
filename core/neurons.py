@@ -6,23 +6,18 @@ with "<n> neurons" in it, and the thumbnail refresh job keeps its own ledger in
 data/thumb_refresh.json (it runs outside the video pipeline and does not write the
 database).
 
-The window is the last 24 hours, rolling: a Neuron spent comes back a day later to the
-minute, not at a fixed time of day. The first reading of the record was a window turning over
-at Pacific midnight (07:00 UTC), and scripts/cf_reset_probe.py disproved it: on 19 October the
-allowance stayed shut from 14:42 to 18:28 UTC and opened at 18:29 UTC - just as the 979
-Neurons spent at 18:08 UTC the day before dropped out of a 24-hour window, leaving that
-morning's 9,216 inside it. The rolling window fits every other observation too (the refusal at
-06:44 UTC on the 19th, the frames of the 16th to the 18th each finding a full allowance at
-about the same time of day as the day before).
+NOTHING IN THE DAILY RUN DECIDES ON THIS FIGURE ANY MORE. It is an estimate of a rule nobody
+has pinned down, and twice now the rule assumed here has been wrong in a way that cost the
+channel: first a window turning over at 07:00 UTC, then (20 October) a rolling 24 hours, which
+the probe of 19 October seemed to confirm. On 22 October that rolling window said 12,902 had
+been spent in the last day - and Cloudflare served the 6,912 Neurons of that morning's frames
+without a single refusal, while this estimate said 0 was free and kept the bust from even being
+asked for. Video 28 went out with a substitute thumbnail because of it.
 
-What follows from it: the daily run draws at roughly the same hour each day, so yesterday's
-frames leave the window about as fast as today's enter it; a run that starts much earlier than
-yesterday's finds less room. Spending this project did not log is invisible here, so the
-figure is an estimate and Cloudflare's refusal remains the final word.
-
-The narration frames come first. The thumbnail stage runs after them, so whatever it sees
-here is what they left; the refresh job runs only after a successful daily run and keeps
-the same reserve.
+So the bust stage asks Cloudflare directly (a refusal costs nothing), the frames are held to a
+fixed per-video cap (images.max_neurons), and this module is left for the retired thumbnail
+refresh job and for reporting. The window below is still the rolling 24 hours; treat what it
+says as a rough guide, never as a reason not to ask.
 """
 import json
 import re
@@ -68,7 +63,7 @@ def window_events(stage_like, now=None):
     try:
         with db._connect() as conn:
             rows = conn.execute(
-                "SELECT message, created_at FROM events WHERE stage IN ('images', 'thumbnail') "
+                "SELECT message, created_at FROM events WHERE stage IN ('images', 'bust', 'thumbnail') "
                 "AND message LIKE '%neurons%'").fetchall()
     except Exception:                                               # noqa: BLE001
         return []
@@ -91,7 +86,7 @@ def spent_today(now=None, ledger_path=LEDGER_PATH):
         with db._connect() as conn:
             rows = conn.execute(
                 "SELECT message, created_at FROM events "
-                "WHERE stage IN ('images', 'thumbnail') AND message LIKE '%neurons%'").fetchall()
+                "WHERE stage IN ('images', 'bust', 'thumbnail') AND message LIKE '%neurons%'").fetchall()
     except Exception:                                               # noqa: BLE001
         rows = []
     for row in rows:
