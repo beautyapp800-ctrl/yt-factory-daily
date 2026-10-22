@@ -430,13 +430,18 @@ def run(video_id, cfg, service=None, sleep=time.sleep):
         try:
             set_thumbnail(service, youtube_id, thumb_path)
             log.info("thumbnail set")
+            db.log_event(video_id, "upload", "info", f"thumbnail set: {Path(thumb_path).name}")
         except UploadError as e:
             # The video is up; a missing thumbnail is fixable by hand and not worth failing
             # the stage over, which would make the next run look like an unfinished upload.
             log.warning("the video is uploaded but its thumbnail was not set: %s", e)
             db.log_event(video_id, "upload", "warning", f"thumbnail not set: {e}")
     else:
-        log.warning("no thumbnail file to set")
+        # Not YouTube's pick for good: scripts/bust_pending.py sets the bust before the video
+        # goes public. The video is private and scheduled until then.
+        log.warning("no thumbnail file to set; the bust is pending")
+        db.log_event(video_id, "upload", "warning",
+                     "thumbnail not set: bust pending, scripts/bust_pending.py sets it")
 
     returned_schedule = (response.get("status") or {}).get("publishAt")
     if scheduled and not returned_schedule:

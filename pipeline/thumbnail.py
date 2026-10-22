@@ -38,7 +38,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageEnhance, ImageFont
 
 from core import db, ocr
-from core.concede import Deferred, concede
+from core.concede import concede
 from core.config import output_dir
 from pipeline import cover_image, phrase as phrase_writer
 from core.logger import get_logger
@@ -654,11 +654,18 @@ def _phrase_for(video_id, title, cfg):
     return title_line_options(title), "", note
 
 
+# The marker the upload stage and scripts/bust_pending.py look for: this video has no thumbnail
+# of its own yet and must get its bust before it is published.
+PENDING = "bust pending"
+
+
 def _bust(video_id, title, video, cfg):
     """The bust thumbnail (pipeline/bust_thumbnail.py): the phrase set on the bust that the
-    bust stage drew before the frames. If that picture is gone it is drawn now. Nothing stands
-    in for it - not a narration frame, not YouTube's own pick - so any failure here defers the
-    video to the next run instead of letting it go out without its thumbnail."""
+    bust stage drew before the frames. If that picture is gone it is drawn now.
+
+    Nothing stands in for it - not a narration frame. If there is no bust, the video is
+    uploaded without a thumbnail of its own (private and scheduled, nobody sees it) and the
+    event says "bust pending"; scripts/bust_pending.py sets the bust before publication."""
     from pipeline import bust_thumbnail
     out = output_dir(video_id)
     outline = {}
@@ -670,15 +677,17 @@ def _bust(video_id, title, video, cfg):
     lessons = [l.get("title", "") for l in (outline.get("lessons") or [])]
     try:
         if not bust_thumbnail.chosen_record(out):
-            log.warning("no bust kept from the bust stage; drawing it now")
+            log.warning("no bust kept from the bust stage; asking for it once more")
             bust_thumbnail.draw(video_id, bust_thumbnail.video_text(video_id), out, cfg)
         details = bust_thumbnail.finish(video_id, title, video.get("topic") or title, out, cfg,
                                         promise=outline.get("promise") or "", lessons=lessons)
-    except Deferred:
-        raise
     except Exception as e:                                           # noqa: BLE001
-        raise Deferred(f"the bust thumbnail could not be made ({e}); the video waits for the "
-                       f"next run") from e
+        msg = (f"{PENDING}: no bust thumbnail yet ({e}); uploading without one, "
+               f"scripts/bust_pending.py sets it before the publish time")
+        log.warning(msg)
+        db.log_event(video_id, "thumbnail", "warning", msg)
+        db.update_video(video_id, thumbnail_path=None)
+        return True
     line = bust_thumbnail.summary(details)
     log.info(line)
     db.log_event(video_id, "thumbnail", "info" if details["passed"] else "warning", line)

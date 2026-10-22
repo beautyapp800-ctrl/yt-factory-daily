@@ -7,7 +7,7 @@ the suite spends no Neurons and no Gemini requests.
 import json
 import sys
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
@@ -381,33 +381,95 @@ def test_the_bust_is_drawn_before_the_frames_and_finished_after(tmp):
     check(video["thumbnail_path"].endswith("thumbnail.jpg"), "the bust thumbnail is recorded")
 
 
-def test_no_bust_means_the_video_waits_not_a_substitute(tmp):
-    from core.concede import Deferred
+REFUSED = ("cloudflare HTTP 429: you have used up your daily free allocation of 10,000 "
+           "neurons")
+
+
+def test_no_bust_means_no_thumbnail_yet_never_a_substitute(tmp):
     import pipeline.bust as bust_stage
     db.DB_PATH = tmp / "wait.db"
     db.init_db()
     config.OUTPUT_DIR = tmp / "out_wait"
     vid = db.create_video("anger")
     db.update_video(vid, seo_title="10 Ways to Win Arguments Through Silence")
-    _stub(cf_error=lambda steps: "cloudflare HTTP 429: you have used up your daily free "
-                                 "allocation of 10,000 neurons")
+    _stub(cf_error=lambda steps: REFUSED)
     used = {}
-    real_classic = thumb.make_thumbnail
+    real_classic, real_draw = thumb.make_thumbnail, thumb.cover_image.draw
     thumb.make_thumbnail = lambda *a, **k: used.setdefault("classic", True)
     thumb.cover_image.draw = _forbidden
     try:
-        for name, stage in (("bust", bust_stage), ("thumbnail", thumb)):
-            try:
-                stage.run(vid, CFG)
-                got = None
-            except Deferred as e:
-                got = e
-            check(got is not None, f"the {name} stage defers when no bust can be drawn ({got})")
+        check(bust_stage.run(vid, CFG), "a refused bust does not stop the run")
+        check(thumb.run(vid, CFG), "nor does the thumbnail stage: the video goes ahead")
     finally:
-        thumb.make_thumbnail = real_classic
+        thumb.make_thumbnail, thumb.cover_image.draw = real_classic, real_draw
         _restore()
-    check("classic" not in used, "and the frame-cut thumbnail is never made in its place")
-    check(not db.get_video(vid).get("thumbnail_path"), "nothing is recorded as the thumbnail")
+    check("classic" not in used, "the frame-cut thumbnail is never made in its place")
+    check(not db.get_video(vid).get("thumbnail_path"),
+          "no file is recorded, so the upload sets no thumbnail of ours")
+    check(any(m.startswith("bust pending") for m in _events("thumbnail")),
+          "and the event marks the bust as pending")
+
+
+def _pending_module():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "bust_pending", Path(__file__).resolve().parent.parent / "scripts" / "bust_pending.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_pending_videos_get_their_bust_before_publication(tmp):
+    import sqlite3
+    from contextlib import closing
+    pend = _pending_module()
+    db.DB_PATH = tmp / "pending.db"
+    db.init_db()
+    config.OUTPUT_DIR = tmp / "out_pending"
+    pend.SAMPLES = tmp / "samples"
+    pend.LEDGER = tmp / "bust_pending.json"
+    now = datetime.now(timezone.utc)
+    ids = {}
+    for name, hours, message in (
+            ("frame_cut", 30, "SILENCE / BEATS ARGUMENTS in amber over scene_027_00.jpg"),
+            ("has_bust", 6, f"bust: SILENCE ENDS DEBATE [layout {bust.LAYOUT}] (words ...)"),
+            ("pending", 4, "bust pending: no bust thumbnail yet"),
+            ("published", -2, "bust pending: no bust thumbnail yet")):
+        vid = db.create_video(name)
+        db.update_video(vid, youtube_id="yt_" + name, seo_title="10 Ways to Stay Calm",
+                        published_at=(now + timedelta(hours=hours)).isoformat())
+        with closing(sqlite3.connect(db.DB_PATH)) as conn:
+            conn.execute("INSERT INTO events (video_id, stage, level, message, created_at) "
+                         "VALUES (?, 'thumbnail', 'info', ?, ?)", (vid, message, now.isoformat()))
+            conn.commit()
+        ids[name] = vid
+    ledger = pend.load_ledger(pend.LEDGER)
+    got = [r["id"] for r in pend.pending(ledger, now)]
+    check(got == [ids["pending"], ids["frame_cut"]],
+          f"the frame-cut and the pending one are due, soonest first; not the bust, not the "
+          f"published one ({got})")
+
+    sent = []
+    import pipeline.upload as upload
+    import core.youtube as youtube
+    real = (upload.set_thumbnail, youtube.build_service, youtube.load_credentials)
+    upload.set_thumbnail = lambda service, yt, path: sent.append((yt, Path(path).name))
+    youtube.build_service = lambda creds: "service"
+    youtube.load_credentials = lambda: "creds"
+    pend.load_config = lambda: CFG
+    _stub(cf_error=lambda steps: REFUSED)
+    try:
+        check(pend.main() == 0 and not sent, "while Cloudflare refuses, nothing is sent")
+        _stub()
+        check(pend.main() == 0, "the next run draws")
+    finally:
+        upload.set_thumbnail, youtube.build_service, youtube.load_credentials = real
+        _restore()
+    check(sent == [("yt_pending", "thumbnail.jpg"), ("yt_frame_cut", "thumbnail.jpg")],
+          f"and sets the bust on both through thumbnails.set ({sent})")
+    ledger = pend.load_ledger(pend.LEDGER)
+    check(set(ledger["done"]) == {str(ids["pending"]), str(ids["frame_cut"])}
+          and not pend.pending(ledger, now), "after which nothing is pending")
 
 
 if __name__ == "__main__":
@@ -425,5 +487,6 @@ if __name__ == "__main__":
         test_the_corner_stays_empty_and_the_check_says_so(tmp)
         test_a_video_without_a_bust_is_done_first_and_old_layouts_again(tmp)
         test_the_bust_is_drawn_before_the_frames_and_finished_after(tmp)
-        test_no_bust_means_the_video_waits_not_a_substitute(tmp)
+        test_no_bust_means_no_thumbnail_yet_never_a_substitute(tmp)
+        test_pending_videos_get_their_bust_before_publication(tmp)
     print("ALL BUST THUMBNAIL TESTS PASSED")
