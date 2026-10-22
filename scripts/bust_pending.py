@@ -8,19 +8,21 @@ schedule this project has managed to pin down, and when it refuses the video is 
 uploaded - private, scheduled - with no thumbnail of its own. This keeps asking until the publish
 time. A refusal costs nothing, so asking often is free; a drawn bust costs about 330 Neurons.
 
-A video is pending when it is on YouTube, its publish time is still ahead, and it has no bust at
-the current layout: either the thumbnail stage logged "bust pending" (or something other than a
-bust, as video 28 did), or the upload stage could not set it. It is settled once this script has
-set a bust, which data/bust_pending.json records.
+A video is pending when it is on YouTube, its publish time is still ahead, and it has no bust of
+its own at the current layout: the thumbnail stage logged "bust temporary" (a kept bust is on it
+as a stand-in, so it already has a cover in the channel's format), or "bust pending" (nothing
+was kept, so it has none), or something other than a bust, as video 28 did; or the upload stage
+could not set it. It is settled once this script has set the video's own bust, which
+data/bust_pending.json records - replacing the stand-in through a second thumbnails.set.
 
 A drawn bust is sent only if every check passed and the picture was found acceptable (Gemini's
 verdict, or OCR's when Gemini is down). A rejected one is drawn again on the next run, at most
 MAX_PAID_TRIES times per video. Every bust that is sent is also kept in assets/busts/
 (pipeline/bust_library.py).
 
-Two hours before publication, if no bust of its own has come, the video's phrase is set on a
-kept bust instead - the one longest out of use - and sent the same way. Never a frame from the
-video, never YouTube's own pick. State is data/bust_pending.json, never the database, so this job
+A video that went up with nothing (the library was empty at the time) gets a kept bust two
+hours before publication if its own has not come. Never a frame from the video, never YouTube's
+own pick. State is data/bust_pending.json, never the database, so this job
 cannot race the daily run over data/factory.db.
 """
 import argparse
@@ -83,6 +85,15 @@ def has_bust(video_id):
             "SELECT 1 FROM events WHERE video_id = ? AND stage = 'upload' "
             "AND message LIKE 'thumbnail not set%' LIMIT 1", (video_id,)).fetchone()
     return made is not None and unset is None
+
+
+def has_temporary(video_id):
+    """True if the daily run put a kept bust on this video as a stand-in."""
+    with db._connect() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM events WHERE video_id = ? AND stage = 'thumbnail' "
+            "AND message LIKE ? LIMIT 1", (video_id, bust_library.TEMPORARY + "%")).fetchone()
+    return row is not None
 
 
 def pending(ledger, now):
@@ -157,8 +168,10 @@ def main():
         elif tries >= MAX_PAID_TRIES:
             report.append(f"- {vid}: {tries} busts drawn and none good enough; not drawing more")
 
-        if details is None and when - now <= LIBRARY_BEFORE:
-            kept = bust_library.pick(ledger["library_uses"])
+        if details is None and when - now <= LIBRARY_BEFORE and not has_temporary(vid):
+            # Only for a video the daily run could give nothing: one that already carries a
+            # kept bust has its format, and is only waiting for its own.
+            kept = bust_library.pick(ledger["library_uses"] + bust_library.uses_from_events())
             if kept is None:
                 report.append(f"- {vid}: no bust of its own and none kept to fall back on")
             else:

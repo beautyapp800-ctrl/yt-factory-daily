@@ -1,14 +1,16 @@
 """Every bust this channel has drawn, kept in git, for the day Cloudflare will not draw one.
 
 A video's bust is drawn first thing in the daily run and asked for again every half hour until
-its publish time (scripts/bust_pending.py). If none comes by two hours before publication, that
-video's phrase is set on a bust from here instead: the same look, at no cost, never YouTube's
-own pick and never a frame from the video. Owner's choice, 22 October.
+its publish time (scripts/bust_pending.py). When the daily run cannot get one, the video's phrase
+is set at once on a bust from here, as a temporary cover, so that it has a cover in the channel's
+format from the moment it is uploaded; its own bust replaces that when it is drawn. Never
+YouTube's own pick and never a frame from the video. Owner's choice, 22 October.
 
 The store only grows. Each bust is a JPEG with a small JSON beside it saying where it came from;
 nothing is ever rewritten, so the daily run and the half-hourly job can both add to it without
 their pushes colliding. Which bust was reused for which video is recorded by the job that reuses
-them, in data/bust_pending.json, and the one picked is the one longest out of use.
+them - as a "bust temporary" event in the database, and by bust-pending in
+data/bust_pending.json - and the one picked is the one longest out of use.
 """
 import hashlib
 import json
@@ -61,6 +63,25 @@ def entries(lib_dir=None):
         meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
         out.append((jpg.name, meta))
     return sorted(out, key=lambda e: _when(e[1].get("drawn_at")))
+
+
+TEMPORARY = "bust temporary"
+
+
+def uses_from_events():
+    """[{"file", "at"}] of every kept bust that was put on a video as its temporary cover,
+    read from the events table - the daily run can write that, but not data/bust_pending.json."""
+    import re
+    from core import db
+    out = []
+    with db._connect() as conn:
+        rows = conn.execute("SELECT message, created_at FROM events WHERE stage = 'thumbnail' "
+                            "AND message LIKE ?", (TEMPORARY + "%",)).fetchall()
+    for row in rows:
+        found = re.search(r"kept bust (\S+\.jpg)", row["message"] or "")
+        if found:
+            out.append({"file": found.group(1), "at": row["created_at"]})
+    return out
 
 
 def pick(uses, lib_dir=None):

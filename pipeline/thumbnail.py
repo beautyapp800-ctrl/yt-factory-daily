@@ -663,10 +663,13 @@ def _bust(video_id, title, video, cfg):
     """The bust thumbnail (pipeline/bust_thumbnail.py): the phrase set on the bust that the
     bust stage drew before the frames. If that picture is gone it is drawn now.
 
-    Nothing stands in for it - not a narration frame. If there is no bust, the video is
-    uploaded without a thumbnail of its own (private and scheduled, nobody sees it) and the
-    event says "bust pending"; scripts/bust_pending.py sets the bust before publication."""
-    from pipeline import bust_thumbnail
+    Nothing stands in for it - not a narration frame. If this video's own bust cannot be had,
+    the phrase is set at once on a bust kept from an earlier video (pipeline/bust_library.py),
+    so the video has a cover in the channel's format from the moment it is uploaded and no
+    delay on GitHub's side can leave it without one. The event says "bust temporary", and
+    scripts/bust_pending.py replaces it with the video's own bust through thumbnails.set when
+    one is drawn. With nothing kept yet the video goes up with none ("bust pending")."""
+    from pipeline import bust_library, bust_thumbnail
     out = output_dir(video_id)
     outline = {}
     if (out / "outline.json").exists():
@@ -682,11 +685,28 @@ def _bust(video_id, title, video, cfg):
         details = bust_thumbnail.finish(video_id, title, video.get("topic") or title, out, cfg,
                                         promise=outline.get("promise") or "", lessons=lessons)
     except Exception as e:                                           # noqa: BLE001
-        msg = (f"{PENDING}: no bust thumbnail yet ({e}); uploading without one, "
-               f"scripts/bust_pending.py sets it before the publish time")
+        kept = bust_library.pick(bust_library.uses_from_events())
+        if kept is not None:
+            try:
+                details = bust_thumbnail.from_library(
+                    video_id, title, video.get("topic") or title, out, kept,
+                    promise=outline.get("promise") or "", lessons=lessons)
+            except Exception as e2:                                  # noqa: BLE001
+                log.warning("the kept bust %s could not be used: %s", kept.name, e2)
+                kept = None
+        if kept is None:
+            msg = (f"{PENDING}: no bust thumbnail yet ({e}) and none kept; uploading without "
+                   f"one, scripts/bust_pending.py sets it before the publish time")
+            log.warning(msg)
+            db.log_event(video_id, "thumbnail", "warning", msg)
+            db.update_video(video_id, thumbnail_path=None)
+            return True
+        msg = (f"{bust_library.TEMPORARY}: no bust of its own yet ({e}); kept bust {kept.name} "
+               f"set until it is drawn, '{details['headline']}' [layout {details['layout']}]"
+               f"{'' if details['passed'] else ', BEST AVAILABLE: ' + '; '.join(details['chosen']['problems'])}")
         log.warning(msg)
         db.log_event(video_id, "thumbnail", "warning", msg)
-        db.update_video(video_id, thumbnail_path=None)
+        db.update_video(video_id, thumbnail_path=details["path"])
         return True
     line = bust_thumbnail.summary(details)
     log.info(line)

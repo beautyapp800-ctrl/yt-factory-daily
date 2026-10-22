@@ -387,7 +387,7 @@ REFUSED = ("cloudflare HTTP 429: you have used up your daily free allocation of 
            "neurons")
 
 
-def test_no_bust_means_no_thumbnail_yet_never_a_substitute(tmp):
+def test_no_bust_and_nothing_kept_means_no_thumbnail_yet_never_a_substitute(tmp):
     import pipeline.bust as bust_stage
     db.DB_PATH = tmp / "wait.db"
     db.init_db()
@@ -396,7 +396,9 @@ def test_no_bust_means_no_thumbnail_yet_never_a_substitute(tmp):
     db.update_video(vid, seo_title="10 Ways to Win Arguments Through Silence")
     _stub(cf_error=lambda steps: REFUSED)
     used = {}
-    real_classic, real_draw = thumb.make_thumbnail, thumb.cover_image.draw
+    real_classic, real_draw, real_lib = (thumb.make_thumbnail, thumb.cover_image.draw,
+                                         library.LIB_DIR)
+    library.LIB_DIR = tmp / "empty_lib"                 # nothing kept yet
     thumb.make_thumbnail = lambda *a, **k: used.setdefault("classic", True)
     thumb.cover_image.draw = _forbidden
     try:
@@ -404,12 +406,54 @@ def test_no_bust_means_no_thumbnail_yet_never_a_substitute(tmp):
         check(thumb.run(vid, CFG), "nor does the thumbnail stage: the video goes ahead")
     finally:
         thumb.make_thumbnail, thumb.cover_image.draw = real_classic, real_draw
+        library.LIB_DIR = real_lib
         _restore()
     check("classic" not in used, "the frame-cut thumbnail is never made in its place")
     check(not db.get_video(vid).get("thumbnail_path"),
-          "no file is recorded, so the upload sets no thumbnail of ours")
+          "with nothing kept no file is recorded, so the upload sets no thumbnail of ours")
     check(any(m.startswith("bust pending") for m in _events("thumbnail")),
           "and the event marks the bust as pending")
+
+
+def test_a_kept_bust_is_the_cover_from_the_first_minute(tmp):
+    import pipeline.bust as bust_stage
+    import pipeline.upload as upload
+    db.DB_PATH = tmp / "temp.db"
+    db.init_db()
+    config.OUTPUT_DIR = tmp / "out_temp"
+    lib = tmp / "temp_lib"
+    real_lib = library.LIB_DIR
+    library.LIB_DIR = lib
+    old = library.add(fake_bust(tmp / "old.jpg", cx=0.45), 20, "seneca", "gemini", "ok",
+                      "2026-10-01T08:00:00+00:00")
+    newer = library.add(fake_bust(tmp / "newer.jpg", cx=0.5), 21, "marcus", "gemini", "ok",
+                        "2026-10-05T08:00:00+00:00")
+    names = []
+    for n in range(2):
+        vid = db.create_video(f"anger{n}")
+        db.update_video(vid, seo_title="10 Ways to Win Arguments Through Silence")
+        _stub(cf_error=lambda steps: REFUSED)
+        try:
+            check(bust_stage.run(vid, CFG) and thumb.run(vid, CFG),
+                  f"video {n + 1}: the stages complete while Cloudflare refuses")
+        finally:
+            _restore()
+        video = db.get_video(vid)
+        check(video["thumbnail_path"].endswith("thumbnail.jpg")
+              and Path(video["thumbnail_path"]).exists(),
+              f"video {n + 1}: it has a thumbnail file to upload")
+        msg = next(m for m in _events("thumbnail") if m.startswith("bust temporary")
+                   and m not in names)
+        names.append(msg)
+    library.LIB_DIR = real_lib
+    check(old in names[0] and newer in names[1],
+          "the second video gets the other bust, not the one just used")
+    check(all(not m.startswith("bust:") for m in _events("thumbnail")),
+          "and neither is recorded as a bust of its own")
+    check([u["file"] for u in library.uses_from_events()] == [old, newer],
+          "the reuse is read back from the database for the next pick")
+    check(any("bust temporary" in m for m in _events("thumbnail")), "the event is on record")
+    check(upload.set_thumbnail is not None, "and the upload stage sends thumbnail_path as it did")
 
 
 def _pending_module():
@@ -546,6 +590,56 @@ def test_two_hours_before_publication_a_kept_bust_is_used(tmp):
     check(yellow > 5000, "the kept bust carries this video's phrase in the channel's layout")
 
 
+def test_the_own_bust_replaces_the_temporary_one_through_thumbnails_set(tmp):
+    import sqlite3
+    from contextlib import closing
+    pend = _pending_module()
+    db.DB_PATH = tmp / "replace.db"
+    db.init_db()
+    config.OUTPUT_DIR = tmp / "out_replace"
+    pend.SAMPLES = tmp / "samples_replace"
+    pend.LEDGER = tmp / "replace.json"
+    real_lib = library.LIB_DIR
+    library.LIB_DIR = tmp / "replace_lib"
+    kept = library.add(fake_bust(tmp / "k.jpg"), 20, "seneca", "gemini", "ok",
+                       "2026-10-01T08:00:00+00:00")
+    now = datetime.now(timezone.utc)
+    vid = db.create_video("temp")
+    db.update_video(vid, youtube_id="yt_temp", seo_title="10 Ways to Stay Calm",
+                    published_at=(now + timedelta(hours=30)).isoformat())
+    with closing(sqlite3.connect(db.DB_PATH)) as conn:
+        conn.execute("INSERT INTO events (video_id, stage, level, message, created_at) VALUES "
+                     "(?, 'thumbnail', 'warning', ?, ?)",
+                     (vid, f"bust temporary: no bust of its own yet (x); kept bust {kept} set "
+                           f"until it is drawn", now.isoformat()))
+        conn.commit()
+    check([r["id"] for r in pend.pending(pend.load_ledger(pend.LEDGER), now)] == [vid],
+          "a video wearing a stand-in is still waiting for its own bust")
+    sent = []
+    import pipeline.upload as upload
+    import core.youtube as youtube
+    real = (upload.set_thumbnail, youtube.build_service, youtube.load_credentials)
+    upload.set_thumbnail = lambda service, yt, path: sent.append((yt, Path(path).name))
+    youtube.build_service = lambda creds: "service"
+    youtube.load_credentials = lambda: "creds"
+    pend.load_config = lambda: CFG
+    _stub(cf_error=lambda steps: REFUSED)
+    try:
+        check(pend.main() == 0 and not sent,
+              "while Cloudflare refuses the stand-in stays and nothing more is sent")
+        _stub()
+        check(pend.main() == 0, "when it answers the run draws")
+    finally:
+        upload.set_thumbnail, youtube.build_service, youtube.load_credentials = real
+        library.LIB_DIR = real_lib
+        _restore()
+    check(sent == [("yt_temp", "thumbnail.jpg")], f"its own bust is sent over it ({sent})")
+    ledger = pend.load_ledger(pend.LEDGER)
+    check(ledger["done"][str(vid)]["source"] == "drawn" and not ledger["library_uses"],
+          "recorded as the video's own, not a reuse")
+    check(not pend.pending(ledger, now), "after which it is no longer pending")
+
+
 if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
@@ -561,8 +655,10 @@ if __name__ == "__main__":
         test_the_corner_stays_empty_and_the_check_says_so(tmp)
         test_a_video_without_a_bust_is_done_first_and_old_layouts_again(tmp)
         test_the_bust_is_drawn_before_the_frames_and_finished_after(tmp)
-        test_no_bust_means_no_thumbnail_yet_never_a_substitute(tmp)
+        test_no_bust_and_nothing_kept_means_no_thumbnail_yet_never_a_substitute(tmp)
+        test_a_kept_bust_is_the_cover_from_the_first_minute(tmp)
         test_pending_videos_get_their_bust_before_publication(tmp)
         test_the_library_keeps_every_bust_and_picks_the_longest_unused(tmp)
         test_two_hours_before_publication_a_kept_bust_is_used(tmp)
+        test_the_own_bust_replaces_the_temporary_one_through_thumbnails_set(tmp)
     print("ALL BUST THUMBNAIL TESTS PASSED")
