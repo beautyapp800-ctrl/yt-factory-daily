@@ -1,0 +1,24 @@
+{
+  "done": {
+    "28": {
+      "at": "2026-10-22T07:51:29+00:00",
+      "youtube_id": "uMQRKMOB_Yk",
+      "headline": "SILENCE WINS ARGUMENTS",
+      "layout": 3,
+      "publish_at": "2026-10-23T18:00:00Z",
+      "note": "set by bust-pending run 39743407987; its own ledger commit failed on .gitignore"
+    }
+  },
+  "tries": {
+    "28": 1
+  },
+  "log": [
+    {
+      "at": "2026-10-22T07:51:29+00:00",
+      "video_id": 28,
+      "neurons": 326,
+      "good": true,
+      "summary": "bust: SILENCE WINS ARGUMENTS [layout 3] (words from phrase, bust of seneca), bust_00.jpg from cloudflare, attempt 1, all checks passed, 326 neurons over 1 Cloudflare calls at 8 steps"
+    }
+  ]
+}

@@ -31,6 +31,7 @@ output/
 data/*
 !data/factory.db
 !data/thumb_refresh.json
+!data/bust_pending.json
 
 # Logs
 logs/
