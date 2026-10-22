@@ -21,6 +21,8 @@ core.logger.LOG_DIR = Path(tempfile.mkdtemp(prefix="yt-factory-test-"))
 from core import config, db, neurons
 import core.images as image_api
 import pipeline.bust_thumbnail as bust
+import pipeline.bust_library as library
+library.LIB_DIR = Path(tempfile.mkdtemp(prefix="yt-factory-busts-"))
 import pipeline.phrase as phrase
 import pipeline.thumbnail as thumb
 import importlib.util
@@ -472,6 +474,78 @@ def test_pending_videos_get_their_bust_before_publication(tmp):
           and not pend.pending(ledger, now), "after which nothing is pending")
 
 
+def test_the_library_keeps_every_bust_and_picks_the_longest_unused(tmp):
+    lib = tmp / "lib"
+    names = []
+    for vid, day in ((30, 1), (31, 2), (32, 3)):
+        names.append(library.add(fake_bust(tmp / f"b{vid}.jpg", cx=0.4 + vid / 100), vid,
+                                 "seneca", "gemini", "ok", f"2026-10-{day:02d}T08:00:00+00:00",
+                                 lib_dir=lib))
+    check(library.add(tmp / "b30.jpg", 30, lib_dir=lib) == names[0]
+          and len(library.entries(lib)) == 3, "a bust already kept is not kept twice")
+    check(library.pick([], lib).name == names[0], "with no reuse the oldest drawn is picked")
+    uses = [{"file": names[0], "at": "2026-10-10T00:00:00+00:00"}]
+    check(library.pick(uses, lib).name == names[1],
+          "once it has been reused, the next longest out of use is")
+    check(library.pick([], tmp / "empty") is None, "an empty library picks nothing")
+
+
+def test_two_hours_before_publication_a_kept_bust_is_used(tmp):
+    import sqlite3
+    from contextlib import closing
+    pend = _pending_module()
+    db.DB_PATH = tmp / "fallback.db"
+    db.init_db()
+    config.OUTPUT_DIR = tmp / "out_fallback"
+    pend.SAMPLES = tmp / "samples_fallback"
+    pend.LEDGER = tmp / "fallback.json"
+    lib = tmp / "fallback_lib"
+    real_lib = library.LIB_DIR
+    library.LIB_DIR = lib
+    kept = library.add(fake_bust(tmp / "kept.jpg"), 20, "seneca", "gemini", "ok",
+                       "2026-10-01T08:00:00+00:00")
+    now = datetime.now(timezone.utc)
+    ids = {}
+    for name, hours in (("soon", 1.5), ("later", 20)):
+        vid = db.create_video(name)
+        db.update_video(vid, youtube_id="yt_" + name, seo_title="10 Ways to Stay Calm",
+                        published_at=(now + timedelta(hours=hours)).isoformat())
+        with closing(sqlite3.connect(db.DB_PATH)) as conn:
+            conn.execute("INSERT INTO events (video_id, stage, level, message, created_at) "
+                         "VALUES (?, 'thumbnail', 'warning', 'bust pending: none', ?)",
+                         (vid, now.isoformat()))
+            conn.commit()
+        ids[name] = vid
+    sent = []
+    import pipeline.upload as upload
+    import core.youtube as youtube
+    real = (upload.set_thumbnail, youtube.build_service, youtube.load_credentials)
+    upload.set_thumbnail = lambda service, yt, path: sent.append((yt, Path(path).name))
+    youtube.build_service = lambda creds: "service"
+    youtube.load_credentials = lambda: "creds"
+    pend.load_config = lambda: CFG
+    _stub(cf_error=lambda steps: REFUSED)
+    try:
+        check(pend.main() == 0, "the run completes while Cloudflare refuses")
+    finally:
+        upload.set_thumbnail, youtube.build_service, youtube.load_credentials = real
+        library.LIB_DIR = real_lib
+        _restore()
+    check(sent == [("yt_soon", "thumbnail.jpg")],
+          f"the video due within two hours gets a kept bust, the later one waits ({sent})")
+    ledger = pend.load_ledger(pend.LEDGER)
+    done = ledger["done"].get(str(ids["soon"]), {})
+    check(done.get("source") == "library" and str(ids["later"]) not in ledger["done"],
+          "the ledger says it came from the library")
+    check([u["file"] for u in ledger["library_uses"]] == [kept],
+          "and which kept bust was used, so it is not the next one picked")
+    with Image.open(config.OUTPUT_DIR / str(ids["soon"]) / "thumbnail.jpg") as img:
+        rgb = np.asarray(img.convert("RGB"), dtype=np.int32)
+    right = rgb[:, round(1280 * bust.TEXT_LEFT):]
+    yellow = ((right[..., 0] > 220) & (right[..., 1] > 170) & (right[..., 2] < 80)).sum()
+    check(yellow > 5000, "the kept bust carries this video's phrase in the channel's layout")
+
+
 if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
@@ -489,4 +563,6 @@ if __name__ == "__main__":
         test_the_bust_is_drawn_before_the_frames_and_finished_after(tmp)
         test_no_bust_means_no_thumbnail_yet_never_a_substitute(tmp)
         test_pending_videos_get_their_bust_before_publication(tmp)
+        test_the_library_keeps_every_bust_and_picks_the_longest_unused(tmp)
+        test_two_hours_before_publication_a_kept_bust_is_used(tmp)
     print("ALL BUST THUMBNAIL TESTS PASSED")

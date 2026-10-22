@@ -15,7 +15,12 @@ set a bust, which data/bust_pending.json records.
 
 A drawn bust is sent only if every check passed and the picture was found acceptable (Gemini's
 verdict, or OCR's when Gemini is down). A rejected one is drawn again on the next run, at most
-MAX_PAID_TRIES times per video. State is data/bust_pending.json, never the database, so this job
+MAX_PAID_TRIES times per video. Every bust that is sent is also kept in assets/busts/
+(pipeline/bust_library.py).
+
+Two hours before publication, if no bust of its own has come, the video's phrase is set on a
+kept bust instead - the one longest out of use - and sent the same way. Never a frame from the
+video, never YouTube's own pick. State is data/bust_pending.json, never the database, so this job
 cannot race the daily run over data/factory.db.
 """
 import argparse
@@ -30,7 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core import db
 from core.config import OUTPUT_DIR, load_config, output_dir
 from core.logger import get_logger
-from pipeline import bust_thumbnail
+from pipeline import bust_library, bust_thumbnail
 
 log = get_logger("bust_pending")
 
@@ -38,6 +43,8 @@ LEDGER = Path(__file__).resolve().parent.parent / "data" / "bust_pending.json"
 SAMPLES = OUTPUT_DIR / "_bust_pending"
 MAX_PAID_TRIES = 3
 WARN_BEFORE = timedelta(hours=3)
+# From this close to publication a kept bust is used if no new one has come (owner's choice).
+LIBRARY_BEFORE = timedelta(hours=2)
 
 
 def _when(value):
@@ -51,9 +58,9 @@ def _when(value):
 def load_ledger(path=None):
     path = path or LEDGER
     if not Path(path).exists():
-        return {"done": {}, "tries": {}, "log": []}
+        return {"done": {}, "tries": {}, "log": [], "library_uses": []}
     data = json.loads(Path(path).read_text(encoding="utf-8"))
-    for key, empty in (("done", {}), ("tries", {}), ("log", [])):
+    for key, empty in (("done", {}), ("tries", {}), ("log", []), ("library_uses", [])):
         data.setdefault(key, empty)
     return data
 
@@ -113,41 +120,62 @@ def main():
     one = bust_thumbnail.neurons_per_image(bust_thumbnail.settings(cfg)["steps"]) + 1
     service = None
     report = []
+    cloudflare_open = True
     SAMPLES.mkdir(parents=True, exist_ok=True)
     for row in todo:
         vid, when = row["id"], _when(row["published_at"])
-        tries = int(ledger["tries"].get(str(vid), 0))
-        if tries >= MAX_PAID_TRIES:
-            report.append(f"- {vid}: {tries} busts drawn and none good enough; not drawing more")
-            continue
         title = row.get("seo_title") or row.get("title") or row["topic"]
         stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        try:
-            details = bust_thumbnail.make(vid, title, row["topic"],
-                                          bust_thumbnail.video_text(vid), output_dir(vid), cfg,
-                                          budget=one)
-        except RuntimeError as e:
-            # Cloudflare said no; it will say the same for the next video in this minute.
-            report.append(f"- {vid}: not drawn this time ({e})")
+        tries = int(ledger["tries"].get(str(vid), 0))
+        details, source = None, "drawn"
+
+        if cloudflare_open and tries < MAX_PAID_TRIES:
+            try:
+                drawn = bust_thumbnail.make(vid, title, row["topic"],
+                                            bust_thumbnail.video_text(vid), output_dir(vid),
+                                            cfg, budget=one)
+            except RuntimeError as e:
+                # Cloudflare said no; it will say the same for the next video this minute.
+                report.append(f"- {vid}: not drawn this time ({e})")
+                cloudflare_open = False
+            else:
+                tries += 1
+                ledger["tries"][str(vid)] = tries
+                chosen = drawn["chosen"]
+                shutil.copyfile(drawn["path"],
+                                SAMPLES / f"video{vid}_{row['youtube_id']}_try{tries}.jpg")
+                good = drawn["passed"] and chosen["vision_ok"]
+                ledger["log"].append({"at": stamp, "video_id": vid, "neurons": drawn["neurons"],
+                                      "good": good, "summary": bust_thumbnail.summary(drawn)})
+                if good:
+                    details = drawn
+                    bust_library.add(output_dir(vid) / "bust" / chosen["source"], vid,
+                                     drawn["philosopher"], chosen["judged_by"], chosen["vision"])
+                else:
+                    report.append(f"- {vid}: drawn but not sent ({chosen['vision']}; "
+                                  f"{'; '.join(chosen['problems']) or 'checks passed'})")
+        elif tries >= MAX_PAID_TRIES:
+            report.append(f"- {vid}: {tries} busts drawn and none good enough; not drawing more")
+
+        if details is None and when - now <= LIBRARY_BEFORE:
+            kept = bust_library.pick(ledger["library_uses"])
+            if kept is None:
+                report.append(f"- {vid}: no bust of its own and none kept to fall back on")
+            else:
+                details, source = bust_thumbnail.from_library(
+                    vid, title, row["topic"], output_dir(vid), kept), "library"
+                shutil.copyfile(details["path"],
+                                SAMPLES / f"video{vid}_{row['youtube_id']}_library.jpg")
+
+        if details is None:
             if when - now <= WARN_BEFORE:
                 print(f"::warning::video {vid} goes public at {row['published_at']} and still "
                       f"has no bust")
-            break
-        ledger["tries"][str(vid)] = tries + 1
-        chosen = details["chosen"]
-        copy = SAMPLES / f"video{vid}_{row['youtube_id']}_try{tries + 1}.jpg"
-        shutil.copyfile(details["path"], copy)
-        line = bust_thumbnail.summary(details)
-        good = details["passed"] and chosen["vision_ok"]
-        ledger["log"].append({"at": stamp, "video_id": vid, "neurons": details["neurons"],
-                              "good": good, "summary": line})
-        if not good:
-            report.append(f"- {vid}: drawn but not sent ({chosen['vision']}; "
-                          f"{'; '.join(chosen['problems']) or 'checks passed'})")
             save_ledger(ledger)
             continue
+        line = bust_thumbnail.summary(details)
         if args.dry_run:
-            report.append(f"- {vid} (dry run): {line}")
+            report.append(f"- {vid} (dry run, {source}): {line}")
             save_ledger(ledger)
             continue
         if service is None:
@@ -157,14 +185,20 @@ def main():
         try:
             set_thumbnail(service, row["youtube_id"], details["path"])
         except UploadError as e:
-            report.append(f"- {vid}: drawn but thumbnails.set failed ({e})")
+            report.append(f"- {vid}: {source} bust ready but thumbnails.set failed ({e})")
             save_ledger(ledger)
             continue
         ledger["done"][str(vid)] = {"at": stamp, "youtube_id": row["youtube_id"],
-                                    "headline": details["headline"], "layout": details["layout"],
+                                    "source": source, "headline": details["headline"],
+                                    "layout": details["layout"],
                                     "publish_at": row["published_at"]}
+        if source == "library":
+            ledger["library_uses"].append({"file": details["library"], "video_id": vid,
+                                           "at": stamp})
+            print(f"::notice::video {vid}: no bust could be drawn in time; set a kept one "
+                  f"({details['library']})")
         save_ledger(ledger)
-        report.append(f"- {vid} (https://youtu.be/{row['youtube_id']}): bust set, {line}")
+        report.append(f"- {vid} (https://youtu.be/{row['youtube_id']}): {source} bust set, {line}")
 
     save_ledger(ledger)
     print("\n".join(report))

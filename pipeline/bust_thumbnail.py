@@ -860,6 +860,31 @@ def finish(video_id, title, topic, out_dir, cfg, promise="", lessons=()):
     return details
 
 
+def from_library(video_id, title, topic, out_dir, bust_path, promise="", lessons=()):
+    """This video's phrase set on a kept bust (pipeline/bust_library.py). Spends nothing.
+
+    Used only when no bust of its own could be drawn by two hours before publication."""
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    headline, headline_source = headline_for(title, topic, promise, lessons)
+    final, result = compose(bust_path, headline, int(video_id) * 7 + 1)
+    chosen = {"attempt": 1, "source": Path(bust_path).name, "provider": "library",
+              "vision_ok": True, "vision": "kept bust, judged when it was drawn",
+              "judged_by": "library", **result}
+    path = out_dir / "thumbnail.jpg"
+    final.save(path, "JPEG", quality=JPEG_QUALITY)
+    small = out_dir / "thumb_small.jpg"
+    final.resize(CHECK_SIZE, Image.LANCZOS).save(small, "JPEG", quality=JPEG_QUALITY)
+    details = {"style": "bust", "layout": LAYOUT, "headline": headline,
+               "headline_source": headline_source, "philosopher": None, "mentions": {},
+               "passed": bool(result["ok"]), "chosen": chosen, "tries": [chosen],
+               "neurons": 0, "cloudflare_calls": 0, "steps": 0, "library": Path(bust_path).name,
+               "path": str(path), "small": str(small)}
+    (out_dir / "thumbnail.json").write_text(json.dumps(details, indent=2, default=str),
+                                            encoding="utf-8")
+    return details
+
+
 def summary(details):
     """One line for the events table. Carries "<n> neurons" so core.neurons counts it."""
     c = details["chosen"]

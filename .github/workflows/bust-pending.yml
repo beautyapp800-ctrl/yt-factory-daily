@@ -90,11 +90,13 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           cp data/bust_pending.json "$RUNNER_TEMP/bust_pending.json"
+          mkdir -p "$RUNNER_TEMP/busts" && cp -n assets/busts/* "$RUNNER_TEMP/busts/" 2>/dev/null || true
           for attempt in 1 2 3 4 5; do
             git fetch origin main
             git reset --hard origin/main
             cp "$RUNNER_TEMP/bust_pending.json" data/bust_pending.json
-            git add data/bust_pending.json
+            mkdir -p assets/busts && cp -n "$RUNNER_TEMP"/busts/* assets/busts/ 2>/dev/null || true
+            git add data/bust_pending.json assets/busts
             if git diff --cached --quiet; then echo "ledger unchanged"; exit 0; fi
             git commit -m "Bust pending ${{ github.run_id }}"
             if git push origin HEAD:main; then exit 0; fi

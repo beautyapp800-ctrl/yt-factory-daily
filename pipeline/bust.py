@@ -33,6 +33,14 @@ def run(video_id, cfg):
         db.log_event(video_id, "bust", "warning", msg)
         return True
     top = record["ranked"][0]
+    if top["acceptable"]:
+        # Kept for the day no bust can be drawn in time (pipeline/bust_library.py).
+        try:
+            from pipeline import bust_library
+            bust_library.add(top["path"], video_id, record["philosopher"],
+                             record["judged_by"], top["notes"])
+        except Exception as e:                                       # noqa: BLE001
+            log.warning("the bust could not be kept in the library: %s", e)
     db.log_event(video_id, "bust", "info",
                  f"bust drawn for {record['philosopher'] or 'a generic Stoic'}, "
                  f"{len(record['ranked'])} candidate(s) judged by {record['judged_by']}, "

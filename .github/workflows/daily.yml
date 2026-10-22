@@ -187,7 +187,8 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data/factory.db
+          mkdir -p assets/busts
+          git add data/factory.db assets/busts
           if git diff --cached --quiet; then
             echo "database unchanged"
             exit 0
@@ -199,11 +200,15 @@ jobs:
           # no rebase here: this run's copy of the file is put on top of whatever the
           # remote has now, and the push is checked by comparing what the remote holds.
           cp data/factory.db "$RUNNER_TEMP/factory.db"
+          # The bust library only ever gains files (pipeline/bust_library.py), so what this run
+          # drew is copied back on top without overwriting anything the remote already has.
+          mkdir -p "$RUNNER_TEMP/busts" && cp -n assets/busts/* "$RUNNER_TEMP/busts/" 2>/dev/null || true
           for attempt in 1 2 3 4 5; do
             git fetch origin "${{ github.ref_name }}"
             git reset --hard "origin/${{ github.ref_name }}"
             cp "$RUNNER_TEMP/factory.db" data/factory.db
-            git add data/factory.db
+            mkdir -p assets/busts && cp -n "$RUNNER_TEMP"/busts/* assets/busts/ 2>/dev/null || true
+            git add data/factory.db assets/busts
             if git diff --cached --quiet; then
               echo "the remote already holds this database"
               exit 0
