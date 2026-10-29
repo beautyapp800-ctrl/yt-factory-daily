@@ -63,7 +63,8 @@ CREATE TABLE IF NOT EXISTS events (
 
 _VIDEO_FIELDS = {"topic", "title", "status", "duration_s", "video_path",
                  "thumbnail_path", "youtube_id", "published_at", "error", "seed",
-                 "seo_title", "description", "tags", "attempts", "relaxed"}
+                 "seo_title", "description", "tags", "attempts", "relaxed",
+                 "search_phrase", "short_youtube_id"}
 
 # How many times a run may try one video before it is left alone and a new one is started.
 # One number, used by run.py, the CI state script and the notification text, so they cannot
@@ -73,7 +74,8 @@ MAX_ATTEMPTS = 3
 # Columns added after the first release, applied to existing databases by _migrate().
 # `title` is the script's working title; `seo_title` is the one published on YouTube
 # (the seo stage writes it, upload prefers it). `tags` is a JSON list.
-_MIGRATIONS = [("videos", "seed", "TEXT"), ("videos", "seo_title", "TEXT"),
+_MIGRATIONS = [("videos", "search_phrase", "TEXT"), ("videos", "short_youtube_id", "TEXT"),
+               ("videos", "seed", "TEXT"), ("videos", "seo_title", "TEXT"),
                ("videos", "description", "TEXT"), ("videos", "tags", "TEXT"),
                ("videos", "attempts", "INTEGER DEFAULT 0"),
                # Empty for a video whose plan passed every rule. Otherwise the rules it was
@@ -343,6 +345,28 @@ def topic_exists(topic):
         row = conn.execute("SELECT 1 FROM videos WHERE lower(topic) = lower(?) LIMIT 1",
                            (topic.strip(),)).fetchone()
         return row is not None
+
+
+def used_search_phrases():
+    """Every search phrase a video has been built on, lower case."""
+    with _connect() as conn:
+        rows = conn.execute("SELECT search_phrase FROM videos WHERE search_phrase IS NOT NULL")
+        return {r["search_phrase"].lower() for r in rows if r["search_phrase"]}
+
+
+def recent_seo_titles(limit=8):
+    with _connect() as conn:
+        rows = conn.execute("SELECT seo_title FROM videos WHERE seo_title IS NOT NULL "
+                            "ORDER BY id DESC LIMIT ?", (limit,))
+        return [r["seo_title"] for r in rows]
+
+
+def recent_search_phrases(limit=2):
+    """The search phrases of the last few videos that had one, newest first."""
+    with _connect() as conn:
+        rows = conn.execute("SELECT search_phrase FROM videos WHERE search_phrase IS NOT NULL "
+                            "AND search_phrase != '' ORDER BY id DESC LIMIT ?", (limit,))
+        return [r["search_phrase"] for r in rows]
 
 
 def recent_topics(limit=200):

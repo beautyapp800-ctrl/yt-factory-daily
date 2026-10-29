@@ -136,6 +136,9 @@ jobs:
             output/${{ steps.state.outputs.video_id }}/outline.json
             output/${{ steps.state.outputs.video_id }}/concept.json
             output/${{ steps.state.outputs.video_id }}/uploaded.json
+            output/${{ steps.state.outputs.video_id }}/short_uploaded.json
+            output/${{ steps.state.outputs.video_id }}/short.json
+            output/${{ steps.state.outputs.video_id }}/short.mp4
           key: video-${{ steps.state.outputs.video_id }}-${{ github.run_id }}
           restore-keys: |
             video-${{ steps.state.outputs.video_id }}-
@@ -158,6 +161,9 @@ jobs:
             output/${{ steps.state.outputs.video_id }}/outline.json
             output/${{ steps.state.outputs.video_id }}/concept.json
             output/${{ steps.state.outputs.video_id }}/uploaded.json
+            output/${{ steps.state.outputs.video_id }}/short_uploaded.json
+            output/${{ steps.state.outputs.video_id }}/short.json
+            output/${{ steps.state.outputs.video_id }}/short.mp4
           key: video-${{ steps.state.outputs.video_id }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Build the contact sheet (how the pictures are reviewed at a glance)

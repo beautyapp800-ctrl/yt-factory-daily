@@ -39,6 +39,7 @@ from core.logger import get_logger
 log = get_logger("seo")
 
 MAX_TITLE = 70
+LONG_PHRASE = 38          # a search phrase longer than this gets the plain ending
 HOOK_MAX = 150                  # what search results show of a description
 MIN_TAGS, MAX_TAGS = 12, 15
 MAX_TAG_LEN = 30
@@ -110,7 +111,27 @@ def chapter_lines(video_id, lesson_titles):
 
 # --- the request -------------------------------------------------------------
 
-def _prompt(title, promise, lessons, complaints):
+def _phrase_rule(phrase, lesson_count, recent_titles=()):
+    if not phrase:
+        return ""
+    from pipeline.search_topics import display
+    recent = ""
+    if recent_titles:
+        recent = ("\nThe rest of the title must not reuse the wording of these recent titles "
+                  "on the channel - a channel page of the same ending reads as one video:\n"
+                  + "\n".join(f"  {t}" for t in recent_titles if t))
+    return f"""
+
+THE TITLE MUST BEGIN WITH THESE EXACT WORDS, in this order, nothing before them:
+  {display(phrase)}
+They are what people type into YouTube search, word for word, and the title is found only if
+it starts with them. After them put " - " or " | " and the rest of the title, for example
+"{display(phrase)} - {lesson_count} Stoic Lessons That ...". Do not change, reorder or
+paraphrase those words. What follows them must be a complete, grammatical phrase - if it does
+not fit, make it shorter, never drop a word from it.{recent}"""
+
+
+def _prompt(title, promise, lessons, complaints, phrase="", recent_titles=()):
     listed = "\n".join(f"  {i}. {t}" for i, t in enumerate(lessons, 1))
     fix = ""
     if complaints:
@@ -129,7 +150,7 @@ Return JSON with these keys:
   is a number plus a promise, in the manner of "10 Stoic Lessons That Will Make You Mentally
   Unbreakable" or "NEVER Explain Yourself Again". If you use a number it must be {len(lessons)},
   the real lesson count. No colon, no emoji, no hashtags. Specific to THIS video's subject, not
-  a title that could sit on any Stoicism video.
+  a title that could sit on any Stoicism video.{_phrase_rule(phrase, len(lessons), recent_titles)}
 
 "hook": the first lines of the description. At most {HOOK_MAX} characters in total, and it
   must stand alone: search results show only this much, so it must be a complete thought that
@@ -153,13 +174,18 @@ def _tidy(value):
     return re.sub(r"[ \t]+", " ", value).strip()
 
 
-def _problems(data, lesson_count):
+def _problems(data, lesson_count, phrase=""):
     """What is wrong with the model's answer, as sentences it can act on. Empty = fine."""
     problems = []
     title = (data.get("title") or "").strip()
     if not title:
         problems.append("title is missing")
     else:
+        if phrase:
+            from pipeline.search_topics import display, starts_with_phrase
+            if not starts_with_phrase(title, phrase):
+                problems.append(f'the title must begin with exactly "{display(phrase)}"; it '
+                                f'begins "{" ".join(title.split()[:len(phrase.split()) + 1])}"')
         if len(title) > MAX_TITLE:
             problems.append(f"title is {len(title)} characters, the limit is {MAX_TITLE}")
         if ":" in title:
@@ -245,17 +271,20 @@ def run(video_id, cfg):
     lessons = [l["title"] for l in outline["lessons"]]
     title = outline.get("title") or (db.get_video(video_id) or {}).get("title") or ""
     promise = outline.get("promise") or (outline.get("concept") or {}).get("promise") or ""
+    phrase = ((outline.get("concept") or {}).get("search_phrase")
+              or (db.get_video(video_id) or {}).get("search_phrase") or "")
 
     data, complaints = {}, []
     for attempt in range(1, ATTEMPTS + 1):
-        data = complete_json(_prompt(title, promise, lessons, complaints), system=SYSTEM,
-                             max_tokens=1200, temperature=0.8)
+        data = complete_json(_prompt(title, promise, lessons, complaints, phrase,
+                                     db.recent_seo_titles(8)),
+                             system=SYSTEM, max_tokens=1200, temperature=0.8)
         if not isinstance(data, dict):
             complaints = ["the answer was not a JSON object"]
             continue
         data = {**data, **{k: _tidy(data.get(k)) for k in ("title", "hook", "summary")},
                 "tags": [_tidy(t) for t in data["tags"]] if isinstance(data.get("tags"), list) else []}
-        complaints = _problems(data, len(lessons))
+        complaints = _problems(data, len(lessons), phrase)
         if not complaints:
             break
         log.warning("seo attempt %d/%d rejected: %s", attempt, ATTEMPTS, "; ".join(complaints))
@@ -278,6 +307,19 @@ def run(video_id, cfg):
                 using=f"the first {len(description)} characters")
     tags = _final_tags(data["tags"])
     seo_title = data["title"].strip()
+    if phrase:
+        from pipeline.search_topics import display, starts_with_phrase
+        if len(display(phrase)) > LONG_PHRASE:
+            # A long search leaves too little room after it: at 44 characters of phrase the
+            # model wrote "10 Stoic Tips Calm Talk". The plain ending is grammatical and fits.
+            seo_title = f"{display(phrase)} - {len(lessons)} Stoic Lessons"[:MAX_TITLE]
+        elif not starts_with_phrase(seo_title, phrase):
+            # The one rule not conceded to the best attempt: a title that does not start with
+            # the search is a title nobody finds, which is the problem this exists to fix.
+            seo_title = f"{display(phrase)} - {len(lessons)} Stoic Lessons"[:MAX_TITLE]
+            concede(video_id, "seo", "the model never put the search phrase first",
+                    using=f"the plain form: {seo_title}")
+        tags = _final_tags([phrase] + list(data["tags"]))
     if not _NUMBER.search(seo_title):
         log.warning("title has no number: %s", seo_title)
 

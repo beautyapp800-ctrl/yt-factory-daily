@@ -725,3 +725,34 @@ on a table», має **INVOICE** великими серифними літер�
 
 **Моніторинг черги:** щодня рахувати відео зі статусом `ready`. Менше трьох —
 попередження, менше одного — тривога.
+
+
+## Subjects from search, and a Short a day
+
+**The subject and the title start from what people type.** `pipeline/search_topics.py` asks
+YouTube's own search autocomplete - each base query (stoicism, marcus aurelius, seneca,
+epictetus, stoic, how to stop overthinking, how to control emotions) and each followed by a
+letter, about 190 questions and 1,500 phrases a day, cached for the day. A phrase scores for
+every list it is in and more for being near the top; the head of each list is pure popularity.
+Out go other meanings and other formats (a word list catches "seneca village" and
+"stoichiometry"), and then a text model is asked, openly, what a person typing each of the top
+phrases is looking for: only "stoic lessons" and "self-help advice" are kept, and a phrase that
+names a modern person or is not English is not. Two phrases that would make the same video
+count as one, and a base query does not root two videos within two days. The title must open
+with the phrase word for word - checked in code, not asked for; a phrase over 38 characters
+gets the plain ending "- 10 Stoic Lessons", because the model's endings after a long phrase
+stopped being grammatical. If autocomplete cannot be reached the day falls back to the seed
+themes and says so in the email. Autocomplete was checked from a GitHub runner
+(`runner-probe` workflow): it answers there as it does locally.
+
+**A Short a day** (`pipeline/short.py`), after the full video is on YouTube: 1080x1920, 40-55
+seconds, one lesson of the day's video chosen by the text model as the one a stranger gets
+with no context. The script is five parts in a fixed order - hook of at most twelve words,
+the idea, ONE moment from the lesson, the takeaway, a closing line naming the full video and
+the channel - checked in code. Read by en-US-AndrewMultilingualNeural with word timings; the
+captions are those words, two or three at a time, never across a sentence (the punctuation is
+taken from the script, because edge reports words bare), the spoken word in yellow. The bust
+opens it; the lesson's own scene pictures follow, each with an eased push-in drawn by one
+affine resample per frame. It is scheduled for the moment its full video goes public. Cost:
+no Cloudflare neurons (pictures exist, text is Gemini or Groq), one videos.insert from the
+uploads bucket. Optional stage: a failed Short never costs the day's video.

@@ -8,7 +8,7 @@ from core import db
 from core.concede import Deferred, concede
 from core.config import ConfigError, load_config
 from core.logger import get_logger
-from pipeline import bust, images, render, script, seo, thumbnail, topic, tts, upload
+from pipeline import bust, images, render, script, seo, short, thumbnail, topic, tts, upload
 
 log = get_logger("run")
 
@@ -32,6 +32,9 @@ STAGES = [
     # a viewer sees for three days - without carrying 300 MB files between disposable
     # runners. publish.py remains for uploading a video by hand.
     ("upload", upload, "uploading"),
+    # The day's Short, after the full video it points to is on YouTube. Optional: a failed
+    # Short costs the day's Short, never the day's video.
+    ("short", short, "uploading"),
 ]
 
 MAX_ATTEMPTS = db.MAX_ATTEMPTS
@@ -41,7 +44,7 @@ MAX_ATTEMPTS = db.MAX_ATTEMPTS
 # every day at 21:00 and that is the only hard requirement, so nothing here
 # is allowed to end a run: topic, script, tts, images and render are what a
 # video physically needs, and upload is what puts it on the channel.
-OPTIONAL_STAGES = ("seo", "thumbnail")
+OPTIONAL_STAGES = ("seo", "thumbnail", "short")
 
 # Days of scheduled video the pipeline tries to hold. Five means four
 # consecutive bad days before a viewer notices anything.
