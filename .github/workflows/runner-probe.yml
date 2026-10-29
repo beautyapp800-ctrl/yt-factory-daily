@@ -1,0 +1,18 @@
+# Asks, from a GitHub runner, whether YouTube's autocomplete and edge-tts (Andrew) answer here.
+# Run by hand from the Actions tab; nothing is uploaded or committed.
+name: runner-probe
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install edge-tts
+      - run: python scripts/runner_probe.py
