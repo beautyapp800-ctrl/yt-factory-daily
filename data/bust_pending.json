@@ -7,10 +7,19 @@
       "layout": 3,
       "publish_at": "2026-10-23T18:00:00Z",
       "note": "set by bust-pending run 39743407987; its own ledger commit failed on .gitignore"
+    },
+    "37": {
+      "at": "2026-10-31T08:46:47+00:00",
+      "youtube_id": "3-iLWy0pbK8",
+      "source": "drawn",
+      "headline": "CONTROL YOUR OWN MIND",
+      "layout": 3,
+      "publish_at": "2026-11-01T19:00:00Z"
     }
   },
   "tries": {
-    "28": 1
+    "28": 1,
+    "37": 1
   },
   "log": [
     {
@@ -19,6 +28,14 @@
       "neurons": 326,
       "good": true,
       "summary": "bust: SILENCE WINS ARGUMENTS [layout 3] (words from phrase, bust of seneca), bust_00.jpg from cloudflare, attempt 1, all checks passed, 326 neurons over 1 Cloudflare calls at 8 steps"
+    },
+    {
+      "at": "2026-10-31T08:46:47+00:00",
+      "video_id": 37,
+      "neurons": 326,
+      "good": true,
+      "summary": "bust: CONTROL YOUR OWN MIND [layout 3] (words from phrase, bust of a generic Stoic), bust_00.jpg from cloudflare, attempt 1, all checks passed, 326 neurons over 1 Cloudflare calls at 8 steps"
     }
-  ]
+  ],
+  "library_uses": []
 }
