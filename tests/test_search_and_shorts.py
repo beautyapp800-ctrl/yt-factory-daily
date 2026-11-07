@@ -97,6 +97,55 @@ def test_a_short_script_is_checked():
           "look-alike hyphens and quotes become plain ones the font has")
 
 
+def test_a_close_short_is_kept_not_dropped():
+    print("test_a_close_short_is_kept_not_dropped")
+    # 2026-11-06/07: three Shorts lost to scripts of 99 words, 88 words, 33 s, all otherwise
+    # fine. Stub everything but the retry loop and see what it does with them.
+    import pipeline.seo  # noqa: F401
+    tmp = Path(tempfile.mkdtemp())
+    real = {k: getattr(short, k) for k in ("lessons_of", "choose_lesson", "write_script", "speak",
+                                           "duration", "soundtrack", "encode", "frames",
+                                           "caption_chunks")}
+    hook = "Why do you brace for blows that never land?"
+    close = "The full video on letting go is on this channel."
+
+    def script(n):
+        return {"hook": hook, "idea": "One idea.", "moment": " ".join(["word"] * (n - 20)) + ".",
+                "takeaway": "Do this.", "closing": close}
+
+    try:
+        cur = [0.0]
+        order = iter([34.0, 36.0, 38.0])
+
+        def speak(text, path, **k):
+            cur[0] = next(order) - short.LEAD - short.TAIL
+            Path(path).write_bytes(b"mp3-" + str(cur[0]).encode())
+            return [(0.0, 0.2, "w")]
+        short.speak = speak
+        short.duration = lambda path: cur[0]
+        short.lessons_of = lambda v: [("Lesson", [{"text": "t", "image_path": None}])]
+        short.choose_lesson = lambda l, t: (0, "test")
+        replies = iter([99, 104, 108])
+        short.write_script = lambda *a, **k: script(next(replies))
+        short.soundtrack = lambda *a, **k: tmp / "a.m4a"
+        short.encode = lambda it, audio, out, **k: Path(out).write_bytes(b"x") or out
+        short.frames = lambda *a, **k: iter(())
+        short.caption_chunks = lambda *a, **k: []
+        report = short.build(1, {}, pictures_for=lambda v, s: [object()], work=tmp)
+        check(abs(report["seconds"] - 38.0) < 0.1,
+              f"three scripts all a little short: the closest, 38 s, is kept ({report['seconds']})")
+        order = iter([20.0, 21.0, 22.0])
+        replies = iter([104, 104, 104])
+        try:
+            short.build(1, {}, pictures_for=lambda v, s: [object()], work=tmp)
+            check(False, "a 22 s Short is still refused")
+        except RuntimeError:
+            check(True, "a 22 s Short is still refused")
+    finally:
+        for k, v in real.items():
+            setattr(short, k, v)
+
+
 def test_captions_never_cross_a_sentence():
     print("test_captions_never_cross_a_sentence")
     script = "Ever notice how you tense up before the next crisis? You are tired. Breathe."
@@ -118,7 +167,7 @@ def test_captions_never_cross_a_sentence():
 def test_the_short_goes_public_with_its_video():
     print("test_the_short_goes_public_with_its_video")
     video = {"youtube_id": "abc123", "seo_title": "How to Stop Overthinking - 10 Lessons",
-             "published_at": "2026-11-01T19:00:00Z", "search_phrase": "how to stop overthinking"}
+             "published_at": "2099-11-01T19:00:00Z", "search_phrase": "how to stop overthinking"}
     report = {"lines": ["Why do you brace for blows that never land?", "One.", "Two.",
                         "The full video is on this channel."], "seconds": 45, "lesson": "x"}
     body = short.short_body(video, report, {"privacy_status": "private"})
@@ -152,6 +201,7 @@ if __name__ == "__main__":
     test_the_choice_spreads_across_the_bases()
     test_the_title_must_open_with_the_search()
     test_a_short_script_is_checked()
+    test_a_close_short_is_kept_not_dropped()
     test_captions_never_cross_a_sentence()
     test_the_short_goes_public_with_its_video()
     test_the_new_columns_can_be_written()

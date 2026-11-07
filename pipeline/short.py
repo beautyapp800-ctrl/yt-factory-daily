@@ -25,6 +25,7 @@ import asyncio
 import json
 import math
 import re
+import shutil
 import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
@@ -52,6 +53,10 @@ CAPTION_SIZE = 128
 CAPTION_Y = 0.60                            # the captions' centre, as a share of the height
 SPOKEN = (255, 214, 0)
 ATTEMPTS = 3
+# What is still a good Short when no attempt hit the target: spoken length in seconds, and the
+# word count worth speaking to find out. A Short is fine anywhere under a minute.
+SOFT_SECONDS = (30.0, 58.0)
+SOFT_WORDS = (80, 155)
 CHAPTER = re.compile(r"^(\d+):(\d\d)\s+(.+)$")
 
 
@@ -456,21 +461,39 @@ def build(video_id, cfg, pictures_for=None, work=None):
 
     lines, complaints, seconds, words = [], [], None, []
     mp3 = work / "short_voice.mp3"
+    spare = work / "short_voice_spare.mp3"
+    fallback = None            # the best script that was only a little short or long
     for attempt in range(1, ATTEMPTS + 1):
         data = write_script(lesson_title, scenes, title, complaints, seconds)
         lines = assemble(data)
         complaints = (script_problems(lines, title, MEDICAL_WORDS) if lines else
                       [f"every one of {', '.join(PARTS)} must be filled in"])
-        if complaints:
+        # A script whose only fault is its length is still spoken, to see how long it really
+        # runs: 99 words against a floor of 100 is a fine Short, and the three runs of
+        # 2026-11-06 and 2026-11-07 that lost theirs were all of this kind.
+        length_only = bool(lines) and all(c.startswith("the script is") for c in complaints)
+        n_words = len(_words(" ".join(lines)))
+        if complaints and not (length_only and SOFT_WORDS[0] <= n_words <= SOFT_WORDS[1]):
             log.warning("Short script attempt %d rejected: %s", attempt, "; ".join(complaints))
             seconds = None
             continue
         words = speak(" ".join(lines), mp3)
         seconds = LEAD + duration(mp3) + TAIL
         if MIN_SECONDS <= seconds <= MAX_SECONDS:
+            complaints = []                    # it runs right, whatever its word count
             break
-        complaints = [f"spoken it runs {seconds:.0f} s"]
-        log.warning("Short attempt %d runs %.1f s", attempt, seconds)
+        if SOFT_SECONDS[0] <= seconds <= SOFT_SECONDS[1] and (
+                fallback is None or abs(seconds - 47) < abs(fallback["seconds"] - 47)):
+            shutil.copyfile(mp3, spare)
+            fallback = {"lines": list(lines), "words": list(words), "seconds": seconds}
+        complaints = complaints or [f"spoken it runs {seconds:.0f} s"]
+        log.warning("Short attempt %d runs %.1f s (%d words)", attempt, seconds, n_words)
+    if complaints and fallback:
+        lines, words, seconds = fallback["lines"], fallback["words"], fallback["seconds"]
+        shutil.copyfile(spare, mp3)
+        log.warning("Short: no script met %.0f-%.0f s, using the closest, %.1f s", MIN_SECONDS,
+                    MAX_SECONDS, seconds)
+        complaints = []
     if complaints:
         raise RuntimeError(f"no usable Short script after {ATTEMPTS} attempts: "
                            f"{'; '.join(complaints)}")
@@ -563,8 +586,13 @@ def short_body(video, report, cfg):
               "selfDeclaredMadeForKids": upload.MADE_FOR_KIDS,
               "containsSyntheticMedia": upload.CONTAINS_SYNTHETIC_MEDIA}
     if video.get("published_at"):
-        status["privacyStatus"] = "private"
-        status["publishAt"] = video["published_at"]
+        from datetime import datetime, timezone
+        due = datetime.fromisoformat(video["published_at"].replace("Z", "+00:00"))
+        if due > datetime.now(timezone.utc):
+            status["privacyStatus"] = "private"
+            status["publishAt"] = video["published_at"]
+        else:                          # a late Short: its video is already public
+            status["privacyStatus"] = "public"
     yt = cfg.get("youtube") or {}
     return {"snippet": {"title": title, "description": description, "tags": tags,
                         "categoryId": str(yt.get("category_id", upload.CATEGORY_ID)),
