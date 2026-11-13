@@ -19,7 +19,8 @@
   },
   "tries": {
     "28": 1,
-    "37": 1
+    "37": 1,
+    "50": 1
   },
   "log": [
     {
@@ -35,6 +36,13 @@
       "neurons": 326,
       "good": true,
       "summary": "bust: CONTROL YOUR OWN MIND [layout 3] (words from phrase, bust of a generic Stoic), bust_00.jpg from cloudflare, attempt 1, all checks passed, 326 neurons over 1 Cloudflare calls at 8 steps"
+    },
+    {
+      "at": "2026-11-13T14:51:56+00:00",
+      "video_id": 50,
+      "neurons": 326,
+      "good": false,
+      "summary": "bust: CONTROL YOUR REACTION [layout 3] (words from phrase, bust of epictetus), bust_00.jpg from cloudflare, attempt 1, BEST AVAILABLE: marble 8, composition 9, likeness 7, face ok, TEXT, 326 neurons over 1 Cloudflare calls at 8 steps"
     }
   ],
   "library_uses": []
