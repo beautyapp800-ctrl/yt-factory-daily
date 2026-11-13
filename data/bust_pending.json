@@ -15,12 +15,20 @@
       "headline": "CONTROL YOUR OWN MIND",
       "layout": 3,
       "publish_at": "2026-11-01T19:00:00Z"
+    },
+    "50": {
+      "at": "2026-11-13T21:23:21+00:00",
+      "youtube_id": "oIXJRCmBJHw",
+      "source": "drawn",
+      "headline": "EXPECTATIONS CAUSE SUFFERING",
+      "layout": 3,
+      "publish_at": "2026-11-14T19:00:00Z"
     }
   },
   "tries": {
     "28": 1,
     "37": 1,
-    "50": 1
+    "50": 2
   },
   "log": [
     {
@@ -43,6 +51,13 @@
       "neurons": 326,
       "good": false,
       "summary": "bust: CONTROL YOUR REACTION [layout 3] (words from phrase, bust of epictetus), bust_00.jpg from cloudflare, attempt 1, BEST AVAILABLE: marble 8, composition 9, likeness 7, face ok, TEXT, 326 neurons over 1 Cloudflare calls at 8 steps"
+    },
+    {
+      "at": "2026-11-13T21:23:21+00:00",
+      "video_id": 50,
+      "neurons": 326,
+      "good": true,
+      "summary": "bust: EXPECTATIONS CAUSE SUFFERING [layout 3] (words from phrase, bust of epictetus), bust_00.jpg from cloudflare, attempt 1, all checks passed, 326 neurons over 1 Cloudflare calls at 8 steps"
     }
   ],
   "library_uses": []
