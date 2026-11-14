@@ -23,12 +23,21 @@
       "headline": "EXPECTATIONS CAUSE SUFFERING",
       "layout": 3,
       "publish_at": "2026-11-14T19:00:00Z"
+    },
+    "51": {
+      "at": "2026-11-14T15:44:06+00:00",
+      "youtube_id": "jkpRMrt3lJA",
+      "source": "drawn",
+      "headline": "CONTROL WHAT YOU CAN",
+      "layout": 3,
+      "publish_at": "2026-11-15T19:00:00Z"
     }
   },
   "tries": {
     "28": 1,
     "37": 1,
-    "50": 2
+    "50": 2,
+    "51": 1
   },
   "log": [
     {
@@ -58,6 +67,13 @@
       "neurons": 326,
       "good": true,
       "summary": "bust: EXPECTATIONS CAUSE SUFFERING [layout 3] (words from phrase, bust of epictetus), bust_00.jpg from cloudflare, attempt 1, all checks passed, 326 neurons over 1 Cloudflare calls at 8 steps"
+    },
+    {
+      "at": "2026-11-14T15:44:06+00:00",
+      "video_id": 51,
+      "neurons": 326,
+      "good": true,
+      "summary": "bust: CONTROL WHAT YOU CAN [layout 3] (words from phrase, bust of a generic Stoic), bust_00.jpg from cloudflare, attempt 1, all checks passed, 326 neurons over 1 Cloudflare calls at 8 steps"
     }
   ],
   "library_uses": []
