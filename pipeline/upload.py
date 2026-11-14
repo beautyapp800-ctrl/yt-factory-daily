@@ -52,7 +52,27 @@ CONTAINS_SYNTHETIC_MEDIA = True
 
 CATEGORY_ID = "22"               # People & Blogs
 DEFAULT_PUBLISH_TIME = "21:00"   # local, config.publish_time
-DEFAULT_PUBLISH_TIMEZONE = "Europe/Kiev"
+DEFAULT_PUBLISH_TIMEZONE = "Europe/Kyiv"
+WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+
+def zone(name):
+    """The zone by its current name or its old one. "Europe/Kiev" stopped resolving on the
+    GitHub runners on 13 November 2026 (it failed four uploads of yt-kids); tzdata in
+    requirements.txt carries both names and this is the second line of defence."""
+    from zoneinfo import ZoneInfoNotFoundError
+    try:
+        return ZoneInfo(name)
+    except ZoneInfoNotFoundError:
+        if name == "Europe/Kiev":
+            return ZoneInfo("Europe/Kyiv")
+        raise
+
+
+def allowed_weekdays(cfg):
+    """{0..6} the channel publishes on (config.publish_weekdays); every day if it says nothing."""
+    days = (cfg or {}).get("publish_weekdays") or WEEKDAYS
+    return {WEEKDAYS.index(str(d)[:3].title()) for d in days}
 DEFAULT_DAYS_AHEAD = 3
 # A slot closer than this to now is not taken: the video needs processing time on YouTube
 # before anyone is sent to it, and nothing nearer would survive a slow upload.
@@ -84,8 +104,10 @@ class UploadError(Exception):
 def publish_at(cfg, now=None, taken=None, last_scheduled=None):
     """When YouTube should make this video public, as RFC 3339 UTC.
 
-    The nearest free daily slot that is at least MIN_LEAD_HOURS away. "Free" means no video
-    of ours already holds that local day: `taken` is every publishAt already handed to
+    The nearest free slot that is at least MIN_LEAD_HOURS away, on one of the channel's
+    publishing days (config.publish_weekdays: Sunday and Wednesday since 14 November 2026,
+    21:00 Kyiv; every day when it is not set). "Free" means no video of ours already holds that
+    local day: `taken` is every publishAt already handed to
     YouTube (db.scheduled_publish_times()), or a single datetime for the end of a queue.
     Counting from the slots rather than from the clock keeps the videos one a day whatever
     time the runner woke up, and a slot that a day-long run just missed is replaced by the
@@ -95,9 +117,10 @@ def publish_at(cfg, now=None, taken=None, last_scheduled=None):
     and UTC+2 in winter, so 21:00 local is 18:00Z for part of the year and 19:00Z for the
     rest.
     """
-    zone = ZoneInfo(cfg.get("timezone") or DEFAULT_PUBLISH_TIMEZONE)
+    tz = zone(cfg.get("timezone") or DEFAULT_PUBLISH_TIMEZONE)
     hour, _, minute = (cfg.get("publish_time") or DEFAULT_PUBLISH_TIME).partition(":")
-    local = (now or datetime.now(timezone.utc)).astimezone(zone)
+    local = (now or datetime.now(timezone.utc)).astimezone(tz)
+    allowed = allowed_weekdays(cfg)
 
     if taken is None:
         taken = last_scheduled
@@ -111,10 +134,11 @@ def publish_at(cfg, now=None, taken=None, last_scheduled=None):
             moment = datetime.fromisoformat(moment.replace("Z", "+00:00"))
         if moment.tzinfo is None:
             moment = moment.replace(tzinfo=timezone.utc)
-        taken_days.add(moment.astimezone(zone).date())
+        taken_days.add(moment.astimezone(tz).date())
 
     when = local.replace(hour=int(hour), minute=int(minute or 0), second=0, microsecond=0)
-    while when < local + timedelta(hours=MIN_LEAD_HOURS) or when.date() in taken_days:
+    while (when < local + timedelta(hours=MIN_LEAD_HOURS) or when.date() in taken_days
+           or when.weekday() not in allowed):
         when += timedelta(days=1)
         when = when.replace(hour=int(hour), minute=int(minute or 0))
     return when.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")

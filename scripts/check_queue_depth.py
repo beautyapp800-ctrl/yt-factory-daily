@@ -38,10 +38,24 @@ def upcoming(now=None):
     return sorted(out)
 
 
+def next_slot(now, cfg):
+    """The next publishing slot after `now` (config.publish_weekdays and publish_time in
+    config.timezone), as an aware datetime, or None when every day is a slot."""
+    if not cfg.get("publish_weekdays"):
+        return None
+    from pipeline import upload
+    zone = upload.zone(cfg.get("timezone") or upload.DEFAULT_PUBLISH_TIMEZONE)
+    return datetime.fromisoformat(upload.publish_at(cfg, now, taken=[])
+                                  .replace("Z", "+00:00")).astimezone(zone)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--min-days", type=float, default=2.0,
                     help="fail when the queue runs out sooner than this")
+    ap.add_argument("--slot-hours", type=float, default=60.0,
+                    help="with config.publish_weekdays: fail when the next slot is nearer "
+                         "than this and has no video scheduled for it")
     ap.add_argument("--run-url", default="")
     args = ap.parse_args()
 
@@ -54,6 +68,32 @@ def main():
     for when, title, vid in rows:
         days = (when - now).total_seconds() / 86400
         print(f"- {when:%Y-%m-%d %H:%M} UTC  (+{days:.1f}d)  {title[:60]}  `{vid}`")
+
+    from core.config import load_config
+    cfg = load_config()
+    slot = next_slot(now, cfg)
+    if slot is not None:
+        # Twice a week and one video ahead: the queue is empty for a day after each video goes
+        # public, by design, so "days of runway" would alert every other evening. What matters
+        # is whether the NEXT slot has a video and how near it is.
+        covered = any(abs((when - slot).total_seconds()) < 3600 for when, _t, _v in rows)
+        hours = (slot - now).total_seconds() / 3600
+        print(f"\n**Next slot: {slot:%A %d.%m.%Y %H:%M} Kyiv ({hours:.0f} h away), "
+              f"{'has a video' if covered else 'has NO video'}.**")
+        if covered or hours >= args.slot_hours:
+            print(f"\nNothing to do (a video is scheduled, or the slot is more than "
+                  f"{args.slot_hours:g} h away and the daily run builds it first).")
+            return 0
+        message = (f"# The next video has nothing scheduled\n\n"
+                   f"The next slot is **{slot:%A %d.%m.%Y %H:%M} Kyiv**, {hours:.0f} hours "
+                   f"away, and no video is scheduled for it. The daily run builds it the day "
+                   f"after the previous one goes public; it has not.\n\n"
+                   f"Run the `daily` workflow by hand.\n")
+        if args.run_url:
+            message += f"\n[This check]({args.run_url})\n"
+        ALERT_FILE.write_text(message, encoding="utf-8")
+        print("\n" + message)
+        return 3
 
     last = rows[-1][0] if rows else now
     runway = (last - now).total_seconds() / 86400

@@ -41,8 +41,15 @@ def finished_today(now=None):
     return row[0] if row else None
 
 
-def decide(now=None):
-    """(run, reason)."""
+def decide(now=None, queue_videos=None):
+    """(run, reason). `queue_videos` is config.queue_videos: with it, a run starts only when
+    fewer than that many videos are scheduled ahead - the channel publishes twice a week, so
+    most days there is nothing to build."""
+    if queue_videos is not None:
+        waiting = db.scheduled_after(now or datetime.now(timezone.utc))
+        if len(waiting) >= queue_videos:
+            return False, (f"{len(waiting)} video(s) already scheduled (the queue holds "
+                           f"{queue_videos}); the next is built once one has gone public")
     unfinished = db.oldest_unfinished(db.MAX_ATTEMPTS)
     if unfinished:
         attempts = (unfinished.get("attempts") or 0) + 1
@@ -62,7 +69,13 @@ def main():
     # unnecessary, and the run itself will say so.
     try:
         db.init_db()
-        run, reason = decide()
+        queue_videos = None
+        try:
+            from core.config import load_config
+            queue_videos = load_config().get("queue_videos")
+        except Exception:                                        # noqa: BLE001
+            pass
+        run, reason = decide(queue_videos=queue_videos)
     except Exception as e:                                       # noqa: BLE001
         run, reason = True, f"could not tell whether there is work ({e}); running anyway"
     print(f"run={'true' if run else 'false'}")

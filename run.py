@@ -177,9 +177,23 @@ def queue_depth_days(cfg, now=None):
     last = db.last_scheduled_publish()
     if not last:
         return 0
-    zone = ZoneInfo(cfg.get("timezone") or "Europe/Kiev")
+    zone = ZoneInfo(cfg.get("timezone") or "Europe/Kyiv")
     now = (now or datetime.now(timezone.utc)).astimezone(zone)
     return max(0, (last.astimezone(zone).date() - now.date()).days)
+
+
+def queue_count(now=None):
+    """How many videos are scheduled on YouTube and still to go public."""
+    return len(db.scheduled_after(now or datetime.now(timezone.utc)))
+
+
+def queue_depth(cfg, now=None):
+    """(depth, target, unit). With config.queue_videos the queue is counted in videos: the
+    channel publishes twice a week, so "days ahead" says nothing, and the rule is to build only
+    for a slot and never more than that many videos ahead. Otherwise the old days-ahead buffer."""
+    if cfg.get("queue_videos") is not None:
+        return queue_count(now), int(cfg["queue_videos"]), "video(s)"
+    return queue_depth_days(cfg, now), int(cfg.get("buffer_days", DEFAULT_BUFFER_DAYS)), "day(s)"
 
 
 def build_until_buffered(cfg):
@@ -191,20 +205,19 @@ def build_until_buffered(cfg):
     going, and the only things that stop it are a full buffer, a spent time
     budget, or a video that could not be assembled at all.
     """
-    target = int(cfg.get("buffer_days", DEFAULT_BUFFER_DAYS))
     budget_s = int(cfg.get("run_time_budget_min", DEFAULT_TIME_BUDGET_MIN)) * 60
     started = time.monotonic()
     made = 0
 
     while True:
-        depth = queue_depth_days(cfg)
-        log.info("buffer: %d day(s) scheduled ahead, target %d", depth, target)
+        depth, target, unit = queue_depth(cfg)
+        log.info("buffer: %d %s scheduled ahead, target %d", depth, unit, target)
         if depth >= target:
-            return made, f"the buffer is {depth} days deep"
+            return made, f"the buffer is {depth} {'days' if unit == 'day(s)' else 'videos'} deep"
         spent = time.monotonic() - started
         if made and spent > budget_s:
             return made, (f"the {budget_s // 60} minute run budget is spent after "
-                          f"{made} video(s); the buffer is {depth} of {target} days")
+                          f"{made} video(s); the buffer is {depth} of {target} {unit}")
 
         existing = db.oldest_unfinished(MAX_ATTEMPTS)
         if existing:
@@ -226,16 +239,16 @@ def build_until_buffered(cfg):
             db.update_video(video_id, attempts=attempts - 1)
             return made, (f"video {video_id} is waiting for the image allowance and will be "
                           f"carried on with by the next run; the buffer is "
-                          f"{queue_depth_days(cfg)} of {target} days")
+                          f"{queue_depth(cfg)[0]} of {target} {unit}")
         if ok:
             made += 1
             # A finished video that did not deepen the queue means it never
             # reached YouTube - uploads off, or the upload stage conceded.
             # Without this the loop would keep building videos nobody has
             # scheduled until the time budget ran out.
-            if queue_depth_days(cfg) <= depth:
+            if queue_depth(cfg)[0] <= depth:
                 return made, (f"video {video_id} finished but the queue is still "
-                              f"{depth} day(s) deep, so it did not reach YouTube; "
+                              f"{depth} {unit} deep, so it did not reach YouTube; "
                               f"not building more until that is fixed")
             continue
         if attempts >= MAX_ATTEMPTS:
@@ -243,7 +256,7 @@ def build_until_buffered(cfg):
                       "run will start a new one", video_id, attempts)
             db.log_event(video_id, "run", "error", f"abandoned after {attempts} attempts")
         return made, (f"video {video_id} could not be assembled; the buffer is "
-                      f"{queue_depth_days(cfg)} of {target} days")
+                      f"{queue_depth(cfg)[0]} of {target} {unit}")
 
 
 def main():
@@ -269,7 +282,7 @@ def main():
     log.info("made %d video(s) this run: %s", made, because)
     # A run that made nothing new but is sitting on a full buffer has done its
     # job. A run that made nothing and has no buffer has not.
-    return 0 if (made or queue_depth_days(cfg) > 0) else 1
+    return 0 if (made or queue_depth(cfg)[0] > 0) else 1
 
 
 if __name__ == "__main__":

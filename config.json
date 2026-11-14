@@ -2,11 +2,16 @@
   "channel_topic": "Stoicism and practical philosophy",
   "language": "en",
   "target_duration_min": 30,
-  "videos_per_week": 7,
+  "videos_per_week": 2,
   "publish_time": "21:00",
+  "publish_weekdays": [
+    "Sun",
+    "Wed"
+  ],
+  "queue_videos": 1,
   "publish_days_ahead": 3,
   "schedule_publish": true,
-  "timezone": "Europe/Kiev",
+  "timezone": "Europe/Kyiv",
   "youtube_publish": true,
   "privacy_status": "private",
   "aspect": "16:9",

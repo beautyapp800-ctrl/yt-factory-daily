@@ -15,6 +15,12 @@ name: daily
 
 on:
   schedule:
+    # Since 14 November 2026 the channel publishes twice a week (Sunday and Wednesday, 21:00
+    # Kyiv) and builds one video ahead (config.queue_videos): these crons fire every day, but
+    # the guard job below stops the run unless fewer than that many videos are scheduled, so a
+    # video is built the day after the previous one goes public and the other days cost
+    # nothing.
+    #
     # Two chances a day, not one. GitHub starts a scheduled job when it has runners free, not
     # when the cron says: every scheduled run of this repository so far began between 2h55 and
     # 5h44 after its time, and GitHub's own documentation says a run may be dropped entirely
