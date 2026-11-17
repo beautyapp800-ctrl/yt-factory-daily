@@ -424,6 +424,44 @@ def run(video_id, cfg, service=None, sleep=time.sleep):
         except youtube.AuthError as e:
             raise UploadError(str(e)) from e
 
+
+    # owner 17.11 (core/ytguard.py, the same in every channel): the marker [ref: stoic/<id>] ends the
+    # description; the whole list of the channel's videos is read first - the video already there is
+    # recorded, not uploaded again; a slot a video of the channel already holds is never taken; when the
+    # list cannot be read in full nothing is uploaded.
+    # 17.11: this token has youtube.upload only - the list is read once the owner re-authorizes with readonly
+    from core import ytguard
+    marker = ytguard.ref("stoic", video_id)
+    snip = body["snippet"]
+    if marker not in snip["description"]:
+        snip["description"] = (snip["description"][:5000 - len(marker) - 2].rstrip() + "\n\n" + marker).lstrip()
+    if "youtube.readonly" in " ".join(getattr(getattr(service, "_http", None), "credentials", None) and service._http.credentials.scopes or []):
+        try:
+            channel_videos = ytguard.all_uploads(service)
+        except ytguard.Doubt as e:
+            raise UploadError(f"not sure the channel was read in full, nothing uploaded: {e}") from e
+        same = ytguard.find_existing(channel_videos, marker, snip["title"])
+        if same:
+            log.warning("video %s is on the channel already as %s; recorded, not uploaded again",
+                        video_id, same["id"])
+            db.update_video(video_id, youtube_id=same["id"])
+            db.update_video(video_id, status="published")
+            return True
+        if body["status"].get("publishAt"):
+            from datetime import datetime as _dt
+            tz = zone(cfg.get("timezone") or "Europe/Kyiv")
+            held = ytguard.taken_days(channel_videos, tz=tz)
+            later = [_dt.fromisoformat(v["publish_at"].replace("Z", "+00:00")) for v in channel_videos
+                     if v["publish_at"]]
+            when = _dt.fromisoformat(body["status"]["publishAt"].replace("Z", "+00:00"))
+            if when.astimezone(tz).date() in held and later:
+                body["status"]["publishAt"] = publish_at(cfg, last_scheduled=max(later + [when]))
+                log.warning("the slot %s is held on the channel already; %s instead", when,
+                            body["status"]["publishAt"])
+    else:
+        log.warning("the token cannot read the channel (youtube.upload only): the shared guard waits for a "
+                    "token with youtube.readonly; the database and the upload marker still stop a second upload")
+
     out = output_dir(video_id)
     privacy = body["status"]["privacyStatus"]
     scheduled = body["status"].get("publishAt")
