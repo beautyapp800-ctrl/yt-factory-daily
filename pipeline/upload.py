@@ -429,7 +429,8 @@ def run(video_id, cfg, service=None, sleep=time.sleep):
     # description; the whole list of the channel's videos is read first - the video already there is
     # recorded, not uploaded again; a slot a video of the channel already holds is never taken; when the
     # list cannot be read in full nothing is uploaded.
-    # 17.11: this token has youtube.upload only - the list is read once the owner re-authorizes with readonly
+    # 18.11: the token has youtube.upload + youtube.readonly (re-authorized by the owner); an old upload-only token
+    # skips the list
     from core import ytguard
     marker = ytguard.ref("stoic", video_id)
     snip = body["snippet"]
@@ -437,6 +438,7 @@ def run(video_id, cfg, service=None, sleep=time.sleep):
         snip["description"] = (snip["description"][:5000 - len(marker) - 2].rstrip() + "\n\n" + marker).lstrip()
     if "youtube.readonly" in " ".join(getattr(getattr(service, "_http", None), "credentials", None) and service._http.credentials.scopes or []):
         try:
+            ytguard.check_channel(service, "UCfITNglsZCw4icWQPStOl3Q")      # M1 Stories: the token's channel (owner 18.11)
             channel_videos = ytguard.all_uploads(service)
         except ytguard.Doubt as e:
             raise UploadError(f"not sure the channel was read in full, nothing uploaded: {e}") from e
