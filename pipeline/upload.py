@@ -452,8 +452,12 @@ def run(video_id, cfg, service=None, sleep=time.sleep):
         if body["status"].get("publishAt"):
             from datetime import datetime as _dt
             tz = zone(cfg.get("timezone") or "Europe/Kyiv")
-            held = ytguard.taken_days(channel_videos, tz=tz)
-            later = [_dt.fromisoformat(v["publish_at"].replace("Z", "+00:00")) for v in channel_videos
+            # 18.11: this channel publishes a long film and a #shorts on the SAME 19:00 slot every day, so a day is
+            # held only by a video of the same kind (a Short never pushes a film, nor a film a Short)
+            is_short = "#shorts" in snip["title"].lower()
+            same_kind = [v for v in channel_videos if ("#shorts" in (v.get("title") or "").lower()) == is_short]
+            held = ytguard.taken_days(same_kind, tz=tz)
+            later = [_dt.fromisoformat(v["publish_at"].replace("Z", "+00:00")) for v in same_kind
                      if v["publish_at"]]
             when = _dt.fromisoformat(body["status"]["publishAt"].replace("Z", "+00:00"))
             if when.astimezone(tz).date() in held and later:
