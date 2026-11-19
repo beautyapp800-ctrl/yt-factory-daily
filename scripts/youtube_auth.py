@@ -7,7 +7,8 @@ docs/youtube-setup.md) in the project root. A browser window opens; choose the G
 account that owns the channel, press Allow, and this script saves secrets/token.json. After
 that nothing here has to be repeated: the saved refresh token renews itself.
 
-It asks for exactly one permission, youtube.upload ("upload videos"), and nothing else.
+It asks for two permissions: youtube.upload ("upload videos") and youtube.readonly ("view your account",
+so the shared guard can read the channel's whole video list before an upload; owner 18.11).
 
 Two things it does that are easy to miss:
   - access_type=offline and prompt=consent make Google hand over a refresh token every time.
@@ -35,7 +36,7 @@ def main():
     from google_auth_oauthlib.flow import InstalledAppFlow
 
     flow = InstalledAppFlow.from_client_secrets_file(str(youtube.CREDENTIALS_PATH),
-                                                     youtube.SCOPES)
+                                                     youtube.AUTH_SCOPES)
     print("A browser window will open. Choose the account that owns the YouTube channel and "
           "press Allow.\nIf Google says it has not verified the app, that is expected for "
           "your own project: Advanced -> Go to the app.\n")
@@ -51,9 +52,9 @@ def main():
               "app, and run the script again.")
         return 1
     granted = set(creds.scopes or [])
-    if not set(youtube.SCOPES) <= granted:
-        print(f"The permission was not granted (got {sorted(granted)}). Run it again and "
-              "leave the upload checkbox ticked.")
+    if not set(youtube.AUTH_SCOPES) <= granted:
+        print(f"A permission was not granted (got {sorted(granted)}). Run it again and "
+              "leave BOTH checkboxes ticked (upload and view).")
         return 1
 
     creds.refresh(Request())          # proves the refresh token works; no API quota used

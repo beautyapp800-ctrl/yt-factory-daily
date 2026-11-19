@@ -140,6 +140,8 @@ def taken_days(videos, extra=(), tz=None):
 
 def notify(subject, body, repo=None):
     """A mail to the owner: a comment that mentions them on the open "run-log" issue (GitHub mails it)."""
+    print(f"NOTIFY (mail is off (owner 18.11): the text stays in the Actions log, nobody is written to): {subject}\n{body}", file=sys.stderr)
+    return
     repo = repo or os.environ.get("GITHUB_REPOSITORY", "")
     if not repo:
         print(f"NOTIFY: {subject}\n{body}", file=sys.stderr)

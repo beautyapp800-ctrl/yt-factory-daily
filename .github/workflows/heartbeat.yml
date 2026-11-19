@@ -62,8 +62,8 @@ jobs:
           number=$(gh issue list --label run-log --state open --json number --jq '.[0].number // empty')
           if [ -z "$number" ]; then
             gh label create run-log --color 0e8a16 --description "One comment per daily run" 2>/dev/null || true
-            number=$(gh issue create --title "Daily run log" --label run-log \
+            number=$(: gh issue create --title "Daily run log" --label run-log \
               --body "One comment per daily run, mentioning the owner so it arrives as an email. Safe to ignore." \
               | grep -o '[0-9]*$')
           fi
-          gh issue comment "$number" --body-file heartbeat.md
+          : gh issue comment "$number" --body-file heartbeat.md

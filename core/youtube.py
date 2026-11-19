@@ -23,6 +23,11 @@ TOKEN_PATH = ROOT / "secrets" / "token.json"
 TOKEN_ENV = "YOUTUBE_TOKEN_JSON"
 
 SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
+# owner 18.11: the shared upload guard (core/ytguard.py) reads the channel's whole video list before every
+# upload - that needs youtube.readonly next to youtube.upload. Only the sign-in asks for both; a saved token is
+# loaded with the scopes it was granted, so an old upload-only token keeps working until the new one is in place.
+READONLY_SCOPE = "https://www.googleapis.com/auth/youtube.readonly"
+AUTH_SCOPES = SCOPES + [READONLY_SCOPE]
 
 REAUTH_HINT = ("run  python scripts/youtube_auth.py  again to sign in and create a fresh "
                "token")
@@ -54,7 +59,7 @@ def load_credentials(token_path=TOKEN_PATH):
         raise AuthError(f"no YouTube token at {token_path} and no {TOKEN_ENV} set; "
                         f"{REAUTH_HINT}")
 
-    creds = Credentials.from_authorized_user_info(info, SCOPES)
+    creds = Credentials.from_authorized_user_info(info, info.get("scopes") or SCOPES)
     if not creds.refresh_token:
         raise AuthError(f"the saved token has no refresh token; {REAUTH_HINT}")
     if not creds.valid:
